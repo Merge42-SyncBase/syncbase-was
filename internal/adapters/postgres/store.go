@@ -584,12 +584,17 @@ func (s *Store) Heartbeat(ctx context.Context, runID uuid.UUID, fence int64, wor
 
 // VerifyProfile rejects a runtime whose processing profile differs from the database.
 func (s *Store) VerifyProfile(ctx context.Context, profile knowledge.Profile) error {
-	var fingerprint string
+	var fingerprint, provider string
+	var chunkSize, chunkOverlap int
 	if err := s.pool.QueryRow(ctx, `
-		SELECT fingerprint FROM syncbase.processing_profile WHERE active=true`).Scan(&fingerprint); err != nil {
+		SELECT fingerprint,provider,chunk_size_tokens,chunk_overlap_tokens
+		FROM syncbase.processing_profile WHERE active=true`).Scan(
+		&fingerprint, &provider, &chunkSize, &chunkOverlap,
+	); err != nil {
 		return fmt.Errorf("load active profile: %w", err)
 	}
-	if fingerprint != profile.Fingerprint {
+	if fingerprint != profile.Fingerprint || provider != profile.Provider ||
+		chunkSize != profile.ChunkSizeTokens || chunkOverlap != profile.ChunkOverlapTokens {
 		return knowledge.ErrProfileMismatch
 	}
 	return nil
@@ -927,23 +932,27 @@ func (s *Store) Search(
 	if len(query) != knowledge.VectorDimension || limit < 1 || limit > 50 || strings.TrimSpace(baseURL) == "" {
 		return nil, knowledge.ErrInvalidArgument
 	}
-	var fingerprint, distance string
-	var dimension int
+	var fingerprint, distance, provider string
+	var dimension, chunkSize, chunkOverlap int
 	var minimumScore float64
 	err := s.pool.QueryRow(ctx, `
-		SELECT fingerprint, vector_dimension, distance, minimum_score
+		SELECT fingerprint, vector_dimension, distance, minimum_score,
+		       provider, chunk_size_tokens, chunk_overlap_tokens
 		FROM syncbase.processing_profile WHERE active=true`).Scan(
 		&fingerprint, &dimension, &distance, &minimumScore,
+		&provider, &chunkSize, &chunkOverlap,
 	)
 	if err != nil {
 		return nil, databaseError("load search profile", err)
 	}
 	if fingerprint != profile.Fingerprint || dimension != profile.VectorDimension ||
-		distance != profile.Distance || minimumScore != profile.MinimumScore {
+		distance != profile.Distance || minimumScore != profile.MinimumScore ||
+		provider != profile.Provider || chunkSize != profile.ChunkSizeTokens ||
+		chunkOverlap != profile.ChunkOverlapTokens {
 		return nil, knowledge.ErrProfileMismatch
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT d.id, d.display_name, v.version_number, c.page_number, c.snippet,
+		SELECT d.id, d.display_name, v.id, v.version_number, c.page_number, c.snippet,
 		       (c.embedding <=> $1) AS cosine_distance
 		FROM syncbase.search_chunk c
 		JOIN syncbase.document_version v
@@ -965,7 +974,7 @@ func (s *Store) Search(
 		var hit knowledge.SearchHit
 		var cosineDistance float64
 		if err := rows.Scan(
-			&hit.DocumentID, &hit.DocumentName, &hit.DocumentVersion,
+			&hit.DocumentID, &hit.DocumentName, &hit.VersionID, &hit.DocumentVersion,
 			&hit.PageNumber, &hit.Snippet, &cosineDistance,
 		); err != nil {
 			return nil, databaseError("scan search hit", err)

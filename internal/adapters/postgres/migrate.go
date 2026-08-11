@@ -22,6 +22,9 @@ var processingAttemptSchema string
 //go:embed migrations/003_fenced_processing_attempt.sql
 var fencedProcessingAttemptSchema string
 
+//go:embed migrations/004_embedding_profile_metadata.sql
+var embeddingProfileMetadataSchema string
+
 type migration struct {
 	version int
 	name    string
@@ -32,6 +35,7 @@ var migrations = []migration{
 	{version: 1, name: "syncbase", sql: initialSchema},
 	{version: 2, name: "processing_step_attempt", sql: processingAttemptSchema},
 	{version: 3, name: "fenced_processing_attempt", sql: fencedProcessingAttemptSchema},
+	{version: 4, name: "embedding_profile_metadata", sql: embeddingProfileMetadataSchema},
 }
 
 // Open returns a bounded PostgreSQL connection pool after a successful ping.
@@ -112,10 +116,12 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, profile knowledge.Profile,
 		_, err = tx.Exec(ctx, `
 			INSERT INTO syncbase.processing_profile(
 				fingerprint, canonical_json, parser_id, chunker_id, embedding_model_id,
-				vector_dimension, distance, minimum_score, active
-			) VALUES ($1, $2::jsonb, $3, $4, $5, $6, $7, $8, true)`,
+				vector_dimension, distance, minimum_score, provider, chunk_size_tokens,
+				chunk_overlap_tokens, active
+			) VALUES ($1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $11, true)`,
 			profile.Fingerprint, canonical, profile.ParserID, profile.ChunkerID,
 			profile.EmbeddingModelID, profile.VectorDimension, profile.Distance, profile.MinimumScore,
+			profile.Provider, profile.ChunkSizeTokens, profile.ChunkOverlapTokens,
 		)
 		if err != nil {
 			return fmt.Errorf("insert processing profile: %w", err)

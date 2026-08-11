@@ -45,6 +45,7 @@ type Hit struct {
 	Score           float64
 	DocumentID      string
 	DocumentName    string
+	VersionID       string
 	DocumentVersion int
 	PageNumber      int
 	Snippet         string
@@ -137,6 +138,7 @@ func (r *Runtime) Documents(ctx context.Context, query string, limit int) ([]Hit
 			Score:           hit.Score,
 			DocumentID:      hit.DocumentID.String(),
 			DocumentName:    hit.DocumentName,
+			VersionID:       hit.VersionID.String(),
 			DocumentVersion: hit.DocumentVersion,
 			PageNumber:      hit.PageNumber,
 			Snippet:         hit.Snippet,

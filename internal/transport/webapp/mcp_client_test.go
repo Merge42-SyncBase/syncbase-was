@@ -13,6 +13,7 @@ import (
 
 func TestMCPClientCallsRealSearchDocumentsTool(t *testing.T) {
 	documentID := uuid.New()
+	versionID := uuid.New()
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/mcp" || request.Header.Get("Authorization") != "Bearer sb_mcp_v1_test" {
 			http.Error(response, "unexpected request", http.StatusUnauthorized)
@@ -21,7 +22,7 @@ func TestMCPClientCallsRealSearchDocumentsTool(t *testing.T) {
 		response.Header().Set("Content-Type", "application/json")
 		_, _ = response.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"results":[{` +
 			`"rank":1,"score":0.91,"document_id":"` + documentID.String() + `",` +
-			`"document_name":"보안 정책","document_version":2,"page_number":3,` +
+			`"document_name":"보안 정책","version_id":"` + versionID.String() + `","document_version":2,"page_number":3,` +
 			`"snippet":"비밀번호는 90일마다 변경합니다.",` +
 			`"source_url":"http://web/sources/` + documentID.String() + `/versions/2?page=3"}]}}}`))
 	}))
@@ -34,7 +35,7 @@ func TestMCPClientCallsRealSearchDocumentsTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchDocuments: %v", err)
 	}
-	if len(hits) != 1 || hits[0].DocumentID != documentID || hits[0].DocumentVersion != 2 ||
+	if len(hits) != 1 || hits[0].DocumentID != documentID || hits[0].VersionID != versionID || hits[0].DocumentVersion != 2 ||
 		hits[0].PageNumber != 3 || hits[0].Rank != 1 {
 		t.Fatalf("hits = %+v", hits)
 	}

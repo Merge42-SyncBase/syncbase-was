@@ -26,4 +26,7 @@ func TestNewProfileProducesStableFingerprint(t *testing.T) {
 	if profile.Fingerprint != wantFingerprint {
 		t.Fatalf("fingerprint = %s, want %s", profile.Fingerprint, wantFingerprint)
 	}
+	if profile.Provider != "local-onnx" || profile.ChunkSizeTokens != 384 || profile.ChunkOverlapTokens != 64 {
+		t.Fatalf("embedding profile metadata = %+v", profile)
+	}
 }

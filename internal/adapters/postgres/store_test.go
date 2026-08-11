@@ -230,8 +230,8 @@ func TestMigrateRecordsAndVerifiesChecksums(t *testing.T) {
 		WHERE checksum ~ '^[0-9a-f]{64}$'`).Scan(&migrations); err != nil {
 		t.Fatalf("query migration ledger: %v", err)
 	}
-	if migrations != 3 {
-		t.Fatalf("migration ledger rows = %d, want 3", migrations)
+	if migrations != 4 {
+		t.Fatalf("migration ledger rows = %d, want 4", migrations)
 	}
 	var originalChecksum string
 	if err := pool.QueryRow(ctx, `

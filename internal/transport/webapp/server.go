@@ -150,6 +150,23 @@ func New(config Config, documents documentService) (http.Handler, error) {
 	mux.Handle("POST /processing-runs/{runID}/retry", server.auth(server.csrf(http.HandlerFunc(server.retryRun))))
 	mux.Handle("GET /sources/{documentID}/versions/{version}", server.auth(http.HandlerFunc(server.sourceViewer)))
 	mux.Handle("GET /sources/{documentID}/versions/{version}/raw.pdf", server.auth(http.HandlerFunc(server.sourceRaw)))
+
+	// The React console is served by a separate same-origin Web service. Keep
+	// its contract under /api/v1 so the UI never needs direct access to the
+	// database, object store, embedding runtime, or MCP credential.
+	mux.Handle("POST /api/v1/session", http.HandlerFunc(server.apiLogin))
+	mux.Handle("GET /api/v1/session", server.auth(http.HandlerFunc(server.apiSession)))
+	mux.Handle("DELETE /api/v1/session", server.auth(server.csrf(http.HandlerFunc(server.apiLogout))))
+	mux.Handle("GET /api/v1/documents", server.auth(http.HandlerFunc(server.apiListDocuments)))
+	mux.Handle("GET /api/v1/documents/{documentID}", server.auth(http.HandlerFunc(server.apiDocument)))
+	mux.Handle("POST /api/v1/documents", server.auth(server.csrf(http.HandlerFunc(server.apiRegisterDocument))))
+	mux.Handle("POST /api/v1/documents/{documentID}/versions", server.auth(server.csrf(http.HandlerFunc(server.apiRegisterVersion))))
+	mux.Handle("POST /api/v1/uploads/preflight", server.auth(server.csrf(http.HandlerFunc(server.apiPreflight))))
+	mux.Handle("GET /api/v1/uploads/recovery", server.auth(http.HandlerFunc(server.apiRecovery)))
+	mux.Handle("POST /api/v1/processing-runs/{runID}/retry", server.auth(server.csrf(http.HandlerFunc(server.apiRetryRun))))
+	mux.Handle("GET /api/v1/search", server.auth(http.HandlerFunc(server.apiSearchDocuments)))
+	mux.Handle("GET /api/v1/documents/{documentID}/versions/{version}/source", server.auth(http.HandlerFunc(server.apiSource)))
+	mux.Handle("GET /api/v1/documents/{documentID}/versions/{version}/raw.pdf", server.auth(http.HandlerFunc(server.apiSourceRaw)))
 	return securityHeaders(mux), nil
 }
 
@@ -237,23 +254,10 @@ func (s *Server) login(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	s.logins.reset(loginKey)
-	token, err := randomToken()
-	if err != nil {
+	if _, err := s.issueSession(response); err != nil {
 		http.Error(response, "로그인 세션을 만들지 못했습니다.", http.StatusInternalServerError)
 		return
 	}
-	csrf, err := randomToken()
-	if err != nil {
-		http.Error(response, "로그인 세션을 만들지 못했습니다.", http.StatusInternalServerError)
-		return
-	}
-	s.sessionMu.Lock()
-	s.sessions[token] = session{csrf: csrf, expiresAt: time.Now().Add(sessionTTL)}
-	s.sessionMu.Unlock()
-	http.SetCookie(response, &http.Cookie{
-		Name: sessionCookie, Value: token, Path: "/", MaxAge: int(sessionTTL.Seconds()),
-		HttpOnly: true, Secure: s.config.CookieSecure, SameSite: http.SameSiteLaxMode,
-	})
 	destination := safeNext(request.FormValue("next"))
 	if destination == "" {
 		destination = "/documents"
@@ -262,15 +266,7 @@ func (s *Server) login(response http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) logout(response http.ResponseWriter, request *http.Request) {
-	if cookie, err := request.Cookie(sessionCookie); err == nil {
-		s.sessionMu.Lock()
-		delete(s.sessions, cookie.Value)
-		s.sessionMu.Unlock()
-	}
-	http.SetCookie(response, &http.Cookie{
-		Name: sessionCookie, Path: "/", MaxAge: -1, HttpOnly: true,
-		Secure: s.config.CookieSecure, SameSite: http.SameSiteLaxMode,
-	})
+	s.deleteSession(response, request)
 	http.Redirect(response, request, "/login", http.StatusSeeOther)
 }
 
@@ -538,6 +534,10 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			if candidate := safeNext(request.Header.Get("X-SyncBase-Return-To")); candidate != "" {
 				nextPath = candidate
 			}
+			if strings.HasPrefix(request.URL.Path, "/api/v1/") {
+				writeAPIError(response, http.StatusUnauthorized, "SESSION_EXPIRED", "로그인 세션이 만료되었습니다.", false)
+				return
+			}
 			if strings.Contains(request.Header.Get("Accept"), "application/json") ||
 				strings.HasPrefix(request.URL.Path, "/api/") {
 				writeJSON(response, http.StatusUnauthorized, map[string]any{
@@ -557,6 +557,10 @@ func (s *Server) csrf(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		current, ok := s.currentSession(request)
 		if !ok {
+			if isAPIRequest(request) {
+				writeAPIError(response, http.StatusUnauthorized, "SESSION_EXPIRED", "로그인 세션이 만료되었습니다.", false)
+				return
+			}
 			http.Error(response, "세션이 만료되었습니다.", http.StatusUnauthorized)
 			return
 		}
@@ -568,6 +572,10 @@ func (s *Server) csrf(next http.Handler) http.Handler {
 			provided = request.FormValue("csrf")
 		}
 		if subtleString(provided, current.csrf) == 0 {
+			if isAPIRequest(request) {
+				writeAPIError(response, http.StatusForbidden, "CSRF_REJECTED", "요청 검증에 실패했습니다.", false)
+				return
+			}
 			http.Error(response, "요청 검증에 실패했습니다.", http.StatusForbidden)
 			return
 		}
@@ -624,6 +632,11 @@ func (s *Server) webError(response http.ResponseWriter, err error) {
 		status, message = http.StatusConflict, "등록 복구 코드가 다른 요청과 충돌합니다."
 	}
 	http.Error(response, message, status)
+}
+
+func isAPIRequest(request *http.Request) bool {
+	return strings.HasPrefix(request.URL.Path, "/api/") ||
+		strings.Contains(request.Header.Get("Accept"), "application/json")
 }
 
 func pathUUID(response http.ResponseWriter, request *http.Request, name string) (uuid.UUID, bool) {

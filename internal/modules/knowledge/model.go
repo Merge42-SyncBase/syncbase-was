@@ -135,14 +135,17 @@ func ProcessingStages() []Stage {
 
 // Profile is the immutable parser, chunker, embedding, and ranking contract.
 type Profile struct {
-	Fingerprint      string
-	ParserID         string
-	ChunkerID        string
-	EmbeddingModelID string
-	ONNXRuntimeID    string
-	VectorDimension  int
-	Distance         string
-	MinimumScore     float64
+	Fingerprint        string
+	ParserID           string
+	ChunkerID          string
+	Provider           string
+	EmbeddingModelID   string
+	ONNXRuntimeID      string
+	VectorDimension    int
+	Distance           string
+	ChunkSizeTokens    int
+	ChunkOverlapTokens int
+	MinimumScore       float64
 }
 
 // NewProfile builds the immutable Go processing profile and canonical representation.
@@ -166,14 +169,17 @@ func NewProfile(modelSHA256, tokenizerSHA256, onnxRuntimeID string, minimumScore
 	)
 	digest := sha256.Sum256([]byte(canonical))
 	return Profile{
-		Fingerprint:      hex.EncodeToString(digest[:]),
-		ParserID:         "pdfium-wasm-1.19.6",
-		ChunkerID:        "page-aware-recursive-v1",
-		EmbeddingModelID: "intfloat/multilingual-e5-small",
-		ONNXRuntimeID:    onnxRuntimeID,
-		VectorDimension:  VectorDimension,
-		Distance:         "cosine",
-		MinimumScore:     minimumScore,
+		Fingerprint:        hex.EncodeToString(digest[:]),
+		ParserID:           "pdfium-wasm-1.19.6",
+		ChunkerID:          "page-aware-recursive-v1",
+		Provider:           "local-onnx",
+		EmbeddingModelID:   "intfloat/multilingual-e5-small",
+		ONNXRuntimeID:      onnxRuntimeID,
+		VectorDimension:    VectorDimension,
+		Distance:           "cosine",
+		ChunkSizeTokens:    384,
+		ChunkOverlapTokens: 64,
+		MinimumScore:       minimumScore,
 	}, canonical, nil
 }
 
@@ -341,6 +347,7 @@ type SearchHit struct {
 	Score           float64   `json:"score"`
 	DocumentID      uuid.UUID `json:"document_id"`
 	DocumentName    string    `json:"document_name"`
+	VersionID       uuid.UUID `json:"version_id"`
 	DocumentVersion int       `json:"document_version"`
 	PageNumber      int       `json:"page_number"`
 	Snippet         string    `json:"snippet"`
