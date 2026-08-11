@@ -584,16 +584,22 @@ func (s *Store) Heartbeat(ctx context.Context, runID uuid.UUID, fence int64, wor
 
 // VerifyProfile rejects a runtime whose processing profile differs from the database.
 func (s *Store) VerifyProfile(ctx context.Context, profile knowledge.Profile) error {
-	var fingerprint, provider string
-	var chunkSize, chunkOverlap int
+	var fingerprint, parserID, chunkerID, embeddingModelID, distance, provider string
+	var dimension, chunkSize, chunkOverlap int
+	var minimumScore float64
 	if err := s.pool.QueryRow(ctx, `
-		SELECT fingerprint,provider,chunk_size_tokens,chunk_overlap_tokens
+		SELECT fingerprint, parser_id, chunker_id, embedding_model_id, vector_dimension,
+		       distance, minimum_score, provider, chunk_size_tokens, chunk_overlap_tokens
 		FROM syncbase.processing_profile WHERE active=true`).Scan(
-		&fingerprint, &provider, &chunkSize, &chunkOverlap,
+		&fingerprint, &parserID, &chunkerID, &embeddingModelID, &dimension,
+		&distance, &minimumScore, &provider, &chunkSize, &chunkOverlap,
 	); err != nil {
 		return fmt.Errorf("load active profile: %w", err)
 	}
-	if fingerprint != profile.Fingerprint || provider != profile.Provider ||
+	if fingerprint != profile.Fingerprint || parserID != profile.ParserID ||
+		chunkerID != profile.ChunkerID || embeddingModelID != profile.EmbeddingModelID ||
+		dimension != profile.VectorDimension || distance != profile.Distance ||
+		minimumScore != profile.MinimumScore || provider != profile.Provider ||
 		chunkSize != profile.ChunkSizeTokens || chunkOverlap != profile.ChunkOverlapTokens {
 		return knowledge.ErrProfileMismatch
 	}
@@ -932,21 +938,22 @@ func (s *Store) Search(
 	if len(query) != knowledge.VectorDimension || limit < 1 || limit > 50 || strings.TrimSpace(baseURL) == "" {
 		return nil, knowledge.ErrInvalidArgument
 	}
-	var fingerprint, distance, provider string
+	var fingerprint, parserID, chunkerID, embeddingModelID, distance, provider string
 	var dimension, chunkSize, chunkOverlap int
 	var minimumScore float64
 	err := s.pool.QueryRow(ctx, `
-		SELECT fingerprint, vector_dimension, distance, minimum_score,
-		       provider, chunk_size_tokens, chunk_overlap_tokens
+		SELECT fingerprint, parser_id, chunker_id, embedding_model_id, vector_dimension,
+		       distance, minimum_score, provider, chunk_size_tokens, chunk_overlap_tokens
 		FROM syncbase.processing_profile WHERE active=true`).Scan(
-		&fingerprint, &dimension, &distance, &minimumScore,
+		&fingerprint, &parserID, &chunkerID, &embeddingModelID, &dimension, &distance, &minimumScore,
 		&provider, &chunkSize, &chunkOverlap,
 	)
 	if err != nil {
 		return nil, databaseError("load search profile", err)
 	}
-	if fingerprint != profile.Fingerprint || dimension != profile.VectorDimension ||
-		distance != profile.Distance || minimumScore != profile.MinimumScore ||
+	if fingerprint != profile.Fingerprint || parserID != profile.ParserID ||
+		chunkerID != profile.ChunkerID || embeddingModelID != profile.EmbeddingModelID ||
+		dimension != profile.VectorDimension || distance != profile.Distance || minimumScore != profile.MinimumScore ||
 		provider != profile.Provider || chunkSize != profile.ChunkSizeTokens ||
 		chunkOverlap != profile.ChunkOverlapTokens {
 		return nil, knowledge.ErrProfileMismatch

@@ -109,8 +109,18 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, profile knowledge.Profile,
 		}
 	}
 
-	var active string
-	err = tx.QueryRow(ctx, "SELECT fingerprint FROM syncbase.processing_profile WHERE active = true FOR UPDATE").Scan(&active)
+	var active, parserID, chunkerID, embeddingModelID, distance, provider string
+	var canonicalMatches bool
+	var vectorDimension, chunkSize, chunkOverlap int
+	var minimumScore float64
+	err = tx.QueryRow(ctx, `
+		SELECT fingerprint, canonical_json = $1::jsonb, parser_id, chunker_id,
+		       embedding_model_id, vector_dimension, distance, minimum_score,
+		       provider, chunk_size_tokens, chunk_overlap_tokens
+		FROM syncbase.processing_profile WHERE active = true FOR UPDATE`, canonical).Scan(
+		&active, &canonicalMatches, &parserID, &chunkerID, &embeddingModelID,
+		&vectorDimension, &distance, &minimumScore, &provider, &chunkSize, &chunkOverlap,
+	)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		_, err = tx.Exec(ctx, `
@@ -128,8 +138,13 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, profile knowledge.Profile,
 		}
 	case err != nil:
 		return fmt.Errorf("load processing profile: %w", err)
-	case active != profile.Fingerprint:
-		return fmt.Errorf("%w: active=%s configured=%s", knowledge.ErrProfileMismatch, active, profile.Fingerprint)
+	case active != profile.Fingerprint || !canonicalMatches ||
+		parserID != profile.ParserID || chunkerID != profile.ChunkerID ||
+		embeddingModelID != profile.EmbeddingModelID || vectorDimension != profile.VectorDimension ||
+		distance != profile.Distance || minimumScore != profile.MinimumScore ||
+		provider != profile.Provider || chunkSize != profile.ChunkSizeTokens ||
+		chunkOverlap != profile.ChunkOverlapTokens:
+		return fmt.Errorf("%w: active processing profile differs from configured contract", knowledge.ErrProfileMismatch)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit migration: %w", err)

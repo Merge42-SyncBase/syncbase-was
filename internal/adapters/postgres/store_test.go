@@ -224,6 +224,14 @@ func TestMigrateRecordsAndVerifiesChecksums(t *testing.T) {
 	if err := postgres.Migrate(ctx, pool, profile, canonical); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.Background(), `
+			UPDATE syncbase.processing_profile
+			SET canonical_json=$1::jsonb, provider=$2
+			WHERE active=true`, canonical, profile.Provider); err != nil {
+			t.Errorf("restore processing profile fixture: %v", err)
+		}
+	})
 	var migrations int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FROM syncbase.schema_migration
@@ -232,6 +240,30 @@ func TestMigrateRecordsAndVerifiesChecksums(t *testing.T) {
 	}
 	if migrations != 4 {
 		t.Fatalf("migration ledger rows = %d, want 4", migrations)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE syncbase.processing_profile
+		SET canonical_json=jsonb_set(canonical_json, '{provider}', '"tampered"')
+		WHERE active=true`); err != nil {
+		t.Fatalf("tamper profile canonical fixture: %v", err)
+	}
+	if err := postgres.Migrate(ctx, pool, profile, canonical); !errors.Is(err, knowledge.ErrProfileMismatch) {
+		t.Fatalf("Migrate after canonical profile tamper error = %v, want ErrProfileMismatch", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE syncbase.processing_profile SET canonical_json=$1::jsonb WHERE active=true`, canonical); err != nil {
+		t.Fatalf("restore profile canonical fixture: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE syncbase.processing_profile SET provider='tampered' WHERE active=true`); err != nil {
+		t.Fatalf("tamper profile metadata fixture: %v", err)
+	}
+	if err := postgres.Migrate(ctx, pool, profile, canonical); !errors.Is(err, knowledge.ErrProfileMismatch) {
+		t.Fatalf("Migrate after metadata profile tamper error = %v, want ErrProfileMismatch", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE syncbase.processing_profile SET provider=$1 WHERE active=true`, profile.Provider); err != nil {
+		t.Fatalf("restore profile metadata fixture: %v", err)
 	}
 	var originalChecksum string
 	if err := pool.QueryRow(ctx, `

@@ -73,3 +73,31 @@ func TestChunkPagesWithCounterUsesTokenizerLimitAndOverlap(t *testing.T) {
 		t.Fatalf("forced split does not preserve 64-token overlap")
 	}
 }
+
+func TestChunkPagesWithProfileHonorsItsTokenSizingContract(t *testing.T) {
+	words := make([]string, 400)
+	for index := range words {
+		words[index] = fmt.Sprintf("token-%04d", index)
+	}
+	counter := func(text string) (int, error) { return len(strings.Fields(text)), nil }
+	chunks, err := processing.ChunkPagesWithProfile([]knowledge.PageText{{
+		PageNumber: 1, Text: strings.Join(words, " "),
+	}}, counter, knowledge.Profile{ChunkSizeTokens: 100, ChunkOverlapTokens: 16})
+	if err != nil {
+		t.Fatalf("ChunkPagesWithProfile: %v", err)
+	}
+	if len(chunks) < 3 {
+		t.Fatalf("chunk count = %d, want at least 3", len(chunks))
+	}
+	for _, chunk := range chunks {
+		count, _ := counter(chunk.Text)
+		if count > 125 {
+			t.Fatalf("chunk %d tokens = %d, want <= 125", chunk.Index, count)
+		}
+	}
+	left := strings.Fields(chunks[0].Text)
+	right := strings.Fields(chunks[1].Text)
+	if strings.Join(left[len(left)-16:], " ") != strings.Join(right[:16], " ") {
+		t.Fatalf("forced split does not preserve profile's 16-token overlap")
+	}
+}

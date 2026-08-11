@@ -156,11 +156,13 @@ func NewProfile(modelSHA256, tokenizerSHA256, onnxRuntimeID string, minimumScore
 		return Profile{}, "", ErrInvalidArgument
 	}
 	canonical := fmt.Sprintf(
-		`{"chunker_id":"page-aware-recursive-v1","distance":"cosine",`+
+		`{"chunk_overlap_tokens":64,"chunk_size_tokens":384,`+
+			`"chunker_id":"page-aware-recursive-v1","distance":"cosine",`+
 			`"embedding_model_id":"intfloat/multilingual-e5-small",`+
 			`"embedding_model_sha256":"%s","minimum_score":%.6f,`+
 			`"onnx_runtime_id":"%s",`+
-			`"parser_id":"pdfium-wasm-1.19.6","tokenizer_sha256":"%s",`+
+			`"parser_id":"pdfium-wasm-1.19.6","provider":"local-onnx",`+
+			`"tokenizer_sha256":"%s",`+
 			`"vector_dimension":384}`,
 		modelSHA256,
 		minimumScore,

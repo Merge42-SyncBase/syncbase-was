@@ -14,9 +14,45 @@ import (
 // tokenizer for one passage.
 type TokenCounter func(string) (int, error)
 
-// ChunkPagesWithCounter applies the production token contract while preserving
-// page boundaries. Forced splits retain up to 64 tokenizer tokens of overlap.
+// ChunkPagesWithCounter applies the default production token contract while
+// preserving page boundaries. New processing code should pass its immutable
+// profile to ChunkPagesWithProfile instead.
 func ChunkPagesWithCounter(pages []knowledge.PageText, counter TokenCounter) ([]knowledge.Chunk, error) {
+	return chunkPages(pages, counter, chunkConfig{
+		target: targetUnits, max: maxUnits, min: minUnits, overlap: forcedOverlapUnits,
+	})
+}
+
+// ChunkPagesWithProfile applies the profile's token sizing contract while
+// preserving page boundaries. Forced splits retain exactly the profile's
+// configured overlap, so the persisted profile and generated chunks cannot
+// silently diverge.
+func ChunkPagesWithProfile(
+	pages []knowledge.PageText,
+	counter TokenCounter,
+	profile knowledge.Profile,
+) ([]knowledge.Chunk, error) {
+	if profile.ChunkSizeTokens < 1 || profile.ChunkSizeTokens > 512 ||
+		profile.ChunkOverlapTokens < 0 || profile.ChunkOverlapTokens >= profile.ChunkSizeTokens {
+		return nil, knowledge.ErrInvalidArgument
+	}
+	target := profile.ChunkSizeTokens
+	return chunkPages(pages, counter, chunkConfig{
+		target:  target,
+		max:     target + target/4,
+		min:     max(1, target*5/24),
+		overlap: profile.ChunkOverlapTokens,
+	})
+}
+
+type chunkConfig struct {
+	target  int
+	max     int
+	min     int
+	overlap int
+}
+
+func chunkPages(pages []knowledge.PageText, counter TokenCounter, config chunkConfig) ([]knowledge.Chunk, error) {
 	if counter == nil {
 		return nil, knowledge.ErrInvalidArgument
 	}
@@ -39,9 +75,9 @@ func ChunkPagesWithCounter(pages []knowledge.PageText, counter TokenCounter) ([]
 			if err != nil || sentenceTokens < 1 {
 				return nil, fmt.Errorf("count sentence tokens: %w", firstError(err, knowledge.ErrInvalidArgument))
 			}
-			if sentenceTokens > maxUnits {
+			if sentenceTokens > config.max {
 				flushCurrent()
-				parts, err := forcedTokenSplit(sentence, counter)
+				parts, err := forcedTokenSplit(sentence, counter, config)
 				if err != nil {
 					return nil, err
 				}
@@ -58,7 +94,7 @@ func ChunkPagesWithCounter(pages []knowledge.PageText, counter TokenCounter) ([]
 			if err != nil {
 				return nil, fmt.Errorf("count candidate tokens: %w", err)
 			}
-			if current != "" && candidateTokens > targetUnits {
+			if current != "" && candidateTokens > config.target {
 				flushCurrent()
 				current = sentence
 			} else {
@@ -66,7 +102,7 @@ func ChunkPagesWithCounter(pages []knowledge.PageText, counter TokenCounter) ([]
 			}
 		}
 		flushCurrent()
-		if err := mergeTokenTail(&chunks, pageStart, counter); err != nil {
+		if err := mergeTokenTail(&chunks, pageStart, counter, config); err != nil {
 			return nil, err
 		}
 	}
@@ -76,11 +112,11 @@ func ChunkPagesWithCounter(pages []knowledge.PageText, counter TokenCounter) ([]
 	return chunks, nil
 }
 
-func forcedTokenSplit(text string, counter TokenCounter) ([]string, error) {
+func forcedTokenSplit(text string, counter TokenCounter, config chunkConfig) ([]string, error) {
 	runes := []rune(text)
 	parts := make([]string, 0)
 	for start := 0; start < len(runes); {
-		end, err := tokenBoundedEnd(runes, start, counter, maxUnits)
+		end, err := tokenBoundedEnd(runes, start, counter, config.max)
 		if err != nil {
 			return nil, err
 		}
@@ -102,7 +138,7 @@ func forcedTokenSplit(text string, counter TokenCounter) ([]string, error) {
 		if end >= len(runes) {
 			break
 		}
-		next, err := tokenOverlapStart(runes, start, end, counter, forcedOverlapUnits)
+		next, err := tokenOverlapStart(runes, start, end, counter, config.overlap)
 		if err != nil {
 			return nil, err
 		}
@@ -161,7 +197,7 @@ func tokenOverlapStart(runes []rune, start, end int, counter TokenCounter, limit
 	return best, nil
 }
 
-func mergeTokenTail(chunks *[]knowledge.Chunk, pageStart int, counter TokenCounter) error {
+func mergeTokenTail(chunks *[]knowledge.Chunk, pageStart int, counter TokenCounter, config chunkConfig) error {
 	values := *chunks
 	if len(values)-pageStart < 2 {
 		return nil
@@ -177,7 +213,7 @@ func mergeTokenTail(chunks *[]knowledge.Chunk, pageStart int, counter TokenCount
 	if err != nil {
 		return err
 	}
-	if tailTokens < minUnits && combinedTokens <= maxUnits {
+	if tailTokens < config.min && combinedTokens <= config.max {
 		values[len(values)-2].Text = combined
 		*chunks = values[:len(values)-1]
 	}

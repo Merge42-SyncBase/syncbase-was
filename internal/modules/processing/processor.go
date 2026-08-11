@@ -119,7 +119,7 @@ func (p *Processor) Process(ctx context.Context, run knowledge.ClaimedRun) error
 		return fail(err)
 	}
 	if !resumed {
-		chunks, err = ChunkPagesWithCounter(pages, p.embedder.CountTokens)
+		chunks, err = ChunkPagesWithProfile(pages, p.embedder.CountTokens, p.profile)
 		if err != nil {
 			return fail(err)
 		}
