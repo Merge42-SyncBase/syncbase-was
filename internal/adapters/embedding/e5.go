@@ -15,7 +15,7 @@ type Config = vector.Config
 
 // E5 translates WAS processing profiles and errors at the embedding seam.
 type E5 struct {
-	engine *vector.E5
+	engine vector.Provider
 }
 
 // New opens the standalone vector engine behind the WAS embedding seam.
