@@ -102,6 +102,14 @@ type apiRegistrationResponse struct {
 	SourceViewerURL string                  `json:"sourceViewerUrl"`
 }
 
+type apiPreflightResponse struct {
+	FileName      string `json:"fileName"`
+	ByteSize      int    `json:"byteSize"`
+	PageCount     int    `json:"pageCount"`
+	SHA256        string `json:"sha256"`
+	SuggestedName string `json:"suggestedName"`
+}
+
 type apiRecoveryResponse struct {
 	Status       knowledge.UploadRecoveryState `json:"status"`
 	Registration *apiRegistrationResponse      `json:"registration,omitempty"`
@@ -226,7 +234,7 @@ func (s *Server) apiPreflight(response http.ResponseWriter, request *http.Reques
 		s.writeAPIError(response, err)
 		return
 	}
-	writeJSON(response, http.StatusOK, result)
+	writeJSON(response, http.StatusOK, preflightResponse(result))
 }
 
 func (s *Server) apiRegisterDocument(response http.ResponseWriter, request *http.Request) {
@@ -269,7 +277,11 @@ func (s *Server) apiRegister(
 }
 
 func (s *Server) apiRecovery(response http.ResponseWriter, request *http.Request) {
-	recovery, err := s.documents.RecoverRegistration(request.Context(), request.URL.Query().Get("requestKey"))
+	requestKey := request.PathValue("requestKey")
+	if requestKey == "" {
+		requestKey = request.URL.Query().Get("requestKey")
+	}
+	recovery, err := s.documents.RecoverRegistration(request.Context(), requestKey)
 	if err != nil {
 		s.writeAPIError(response, err)
 		return
@@ -403,6 +415,16 @@ func documentResponse(document knowledge.DocumentDetails) apiDocumentResponse {
 	return apiDocumentResponse{
 		ID: document.ID, Name: document.Name, ActiveVersion: document.ActiveVersion,
 		Versions: versions, UpdatedAt: updatedAt,
+	}
+}
+
+func preflightResponse(result documents.Preflight) apiPreflightResponse {
+	return apiPreflightResponse{
+		FileName:      result.FileName,
+		ByteSize:      result.ByteSize,
+		PageCount:     result.PageCount,
+		SHA256:        result.SHA256,
+		SuggestedName: result.SuggestedName,
 	}
 }
 

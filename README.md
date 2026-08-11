@@ -29,7 +29,7 @@ go vet ./...
 | `GET` | `/api/v1/documents/{id}` | 문서 및 버전 처리 상태 |
 | `POST` | `/api/v1/documents/{id}/versions` | 새 PDF 버전 등록 |
 | `POST` | `/api/v1/uploads/preflight` | 서버 PDF 검사·SHA-256·페이지 수 |
-| `GET` | `/api/v1/uploads/recovery` | request key 기반 응답 유실 복구 |
+| `GET` | `/api/v1/uploads/recovery/{requestKey}` | request key 기반 응답 유실 복구 |
 | `POST` | `/api/v1/processing-runs/{id}/retry` | 소진된 일시 오류의 재시도 |
 | `GET` | `/api/v1/search` | WAS가 MCP `search_documents`를 호출하는 근거 검색 |
 | `GET` | `/api/v1/documents/{id}/versions/{n}/source` | 정확한 문서·버전·페이지 근거 메타데이터 |

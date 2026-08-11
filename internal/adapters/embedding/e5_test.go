@@ -28,3 +28,18 @@ func TestTranslatePreservesWASErrorContract(t *testing.T) {
 		})
 	}
 }
+
+func TestVectorProfilePreservesTheCompleteIndexingContract(t *testing.T) {
+	t.Parallel()
+
+	profile := knowledge.Profile{
+		Provider: "local-onnx", EmbeddingModelID: "intfloat/multilingual-e5-small",
+		VectorDimension: knowledge.VectorDimension, Distance: "cosine",
+		ChunkSizeTokens: 384, ChunkOverlapTokens: 64,
+	}
+	got := vectorProfile(profile)
+	if got.Provider != profile.Provider || got.ChunkSizeTokens != profile.ChunkSizeTokens ||
+		got.ChunkOverlapTokens != profile.ChunkOverlapTokens {
+		t.Fatalf("vector profile = %+v, want provider and chunk contract from %+v", got, profile)
+	}
+}

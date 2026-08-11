@@ -4,7 +4,6 @@ go 1.26.5
 
 require (
 	github.com/Merge42-SyncBase/syncbase-embedding v0.0.0
-	github.com/Merge42-SyncBase/syncbase-frontend v0.0.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/klippa-app/go-pdfium v1.19.6
@@ -14,8 +13,6 @@ require (
 )
 
 replace github.com/Merge42-SyncBase/syncbase-embedding => ../vector-embedding
-
-replace github.com/Merge42-SyncBase/syncbase-frontend => ../frontend
 
 require (
 	github.com/emirpasic/gods v1.18.1 // indirect

@@ -83,9 +83,7 @@ func run(ctx context.Context) error {
 	handler, err := webapp.New(webapp.Config{
 		AdminUsername:       config.Value("SYNCBASE_ADMIN_USERNAME", "admin"),
 		AdminPasswordBcrypt: adminHash, CookieSecure: cookieSecure,
-		StaticRoot:       config.Value("SYNCBASE_WEB_STATIC_ROOT", ""),
-		EnvironmentLabel: config.Value("SYNCBASE_ENVIRONMENT_LABEL", "PostgreSQL reference · Go"),
-		MCPURL:           mcpURL, MCPToken: mcpToken,
+		MCPURL: mcpURL, MCPToken: mcpToken,
 	}, documentService)
 	if err != nil {
 		return err

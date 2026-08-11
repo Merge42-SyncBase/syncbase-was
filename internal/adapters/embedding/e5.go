@@ -61,9 +61,12 @@ func (e *E5) Close() error {
 
 func vectorProfile(profile knowledge.Profile) vector.Profile {
 	return vector.Profile{
-		EmbeddingModelID: profile.EmbeddingModelID,
-		VectorDimension:  profile.VectorDimension,
-		Distance:         profile.Distance,
+		Provider:           profile.Provider,
+		EmbeddingModelID:   profile.EmbeddingModelID,
+		VectorDimension:    profile.VectorDimension,
+		Distance:           profile.Distance,
+		ChunkSizeTokens:    profile.ChunkSizeTokens,
+		ChunkOverlapTokens: profile.ChunkOverlapTokens,
 	}
 }
 

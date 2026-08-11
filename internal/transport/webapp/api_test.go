@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -134,6 +135,75 @@ func TestAPISourcePreservesExactDocumentVersionAndPage(t *testing.T) {
 	if source.DocumentID != documentID || source.VersionID != versionID || source.Version != 3 || source.Page != 5 ||
 		source.SourceURL != "/sources/"+documentID.String()+"/versions/3?page=5" {
 		t.Fatalf("source provenance changed: %#v", source)
+	}
+}
+
+func TestAPIPreflightUsesThePublishedCamelCaseContract(t *testing.T) {
+	store := &apiFixtureDocumentStore{preflight: documents.Preflight{
+		FileName: "운영 정책.pdf", ByteSize: 1234, PageCount: 3,
+		SHA256: "aabbcc", SuggestedName: "운영 정책",
+	}}
+	server := httptest.NewServer(newTestHandler(t, store))
+	t.Cleanup(server.Close)
+	client := newCookieClient(t)
+	csrf := loginAPI(t, client, server.URL)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "운영 정책.pdf")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err := part.Write([]byte("%PDF-test")); err != nil {
+		t.Fatalf("write PDF: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/uploads/preflight", &body)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("X-CSRF-Token", csrf)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(response.Body)
+		t.Fatalf("preflight status=%d body=%s", response.StatusCode, payload)
+	}
+	var got apiPreflightResponse
+	decodeResponse(t, response, &got)
+	if got.FileName != store.preflight.FileName || got.ByteSize != store.preflight.ByteSize ||
+		got.PageCount != store.preflight.PageCount || got.SHA256 != store.preflight.SHA256 ||
+		got.SuggestedName != store.preflight.SuggestedName {
+		t.Fatalf("unexpected preflight response: %#v", got)
+	}
+}
+
+func TestAPIRecoveryAcceptsTheRequestKeyAsAPathedResource(t *testing.T) {
+	handler := newTestHandler(t, &apiFixtureDocumentStore{recovery: knowledge.UploadRecovery{State: knowledge.UploadNotCommitted}})
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	client := newCookieClient(t)
+	csrf := loginAPI(t, client, server.URL)
+
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/uploads/recovery/request-key", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	request.Header.Set("X-CSRF-Token", csrf)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("recovery status=%d body=%s", response.StatusCode, body)
 	}
 }
 
