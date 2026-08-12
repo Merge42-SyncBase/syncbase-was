@@ -19,6 +19,7 @@ import (
 
 	"github.com/Merge42-SyncBase/syncbase-was/internal/modules/documents"
 	"github.com/Merge42-SyncBase/syncbase-was/internal/modules/knowledge"
+	"github.com/Merge42-SyncBase/syncbase-was/internal/modules/sessions"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -39,6 +40,8 @@ type Config struct {
 	CookieSecure        bool
 	MCPURL              string
 	MCPToken            string
+	WorkerReadyURL      string
+	Sessions            sessions.Store
 }
 
 type documentService interface {
@@ -50,11 +53,6 @@ type documentService interface {
 	RecoverRegistration(context.Context, string) (knowledge.UploadRecovery, error)
 	Retry(context.Context, uuid.UUID, string) (uuid.UUID, error)
 	Ready(context.Context) error
-}
-
-type session struct {
-	csrf      string
-	expiresAt time.Time
 }
 
 type loginFailure struct {
@@ -72,17 +70,17 @@ type loginGuard struct {
 type Server struct {
 	config    Config
 	documents documentService
-	sessions  map[string]session
-	sessionMu sync.Mutex
+	sessions  sessions.Store
 	logins    loginGuard
 	search    *mcpClient
+	worker    *readinessClient
 }
 
 // New returns the configured browser API handler.
 func New(config Config, documents documentService) (http.Handler, error) {
 	cost, passwordErr := bcrypt.Cost([]byte(config.AdminPasswordBcrypt))
 	if strings.TrimSpace(config.AdminUsername) == "" || passwordErr != nil ||
-		cost < bcrypt.MinCost || documents == nil {
+		cost < bcrypt.MinCost || documents == nil || config.Sessions == nil {
 		return nil, fmt.Errorf("invalid web configuration: %w", knowledge.ErrInvalidArgument)
 	}
 	var search *mcpClient
@@ -93,9 +91,17 @@ func New(config Config, documents documentService) (http.Handler, error) {
 			return nil, fmt.Errorf("configure MCP search client: %w", err)
 		}
 	}
+	var worker *readinessClient
+	if config.WorkerReadyURL != "" {
+		var err error
+		worker, err = newReadinessClient(config.WorkerReadyURL, &http.Client{Timeout: 3 * time.Second})
+		if err != nil {
+			return nil, fmt.Errorf("configure worker readiness client: %w", err)
+		}
+	}
 	server := &Server{
-		config: config, documents: documents, sessions: make(map[string]session),
-		logins: loginGuard{failures: make(map[string]loginFailure)}, search: search,
+		config: config, documents: documents, sessions: config.Sessions,
+		logins: loginGuard{failures: make(map[string]loginFailure)}, search: search, worker: worker,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(response http.ResponseWriter, _ *http.Request) {
@@ -132,6 +138,12 @@ func (s *Server) readiness(response http.ResponseWriter, request *http.Request) 
 			return
 		}
 	}
+	if s.worker != nil {
+		if err := s.worker.Ready(ctx); err != nil {
+			writeAPIError(response, http.StatusServiceUnavailable, "NOT_READY", "문서 처리 서비스가 준비되지 않았습니다.", true)
+			return
+		}
+	}
 	writeJSON(response, http.StatusOK, map[string]string{"status": "ready"})
 }
 
@@ -158,7 +170,10 @@ func (s *Server) readPDF(response http.ResponseWriter, request *http.Request) ([
 
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if _, ok := s.currentSession(request); !ok {
+		if _, ok, err := s.currentSession(request.Context(), request); err != nil {
+			writeAPIError(response, http.StatusServiceUnavailable, "TEMPORARILY_UNAVAILABLE", "세션 저장소를 확인하세요.", true)
+			return
+		} else if !ok {
 			writeAPIError(response, http.StatusUnauthorized, "SESSION_EXPIRED", "로그인 세션이 만료되었습니다.", false)
 			return
 		}
@@ -168,7 +183,11 @@ func (s *Server) auth(next http.Handler) http.Handler {
 
 func (s *Server) csrf(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		current, ok := s.currentSession(request)
+		current, ok, err := s.currentSession(request.Context(), request)
+		if err != nil {
+			writeAPIError(response, http.StatusServiceUnavailable, "TEMPORARILY_UNAVAILABLE", "세션 저장소를 확인하세요.", true)
+			return
+		}
 		if !ok {
 			writeAPIError(response, http.StatusUnauthorized, "SESSION_EXPIRED", "로그인 세션이 만료되었습니다.", false)
 			return
@@ -178,7 +197,7 @@ func (s *Server) csrf(next http.Handler) http.Handler {
 			request.Body = http.MaxBytesReader(response, request.Body, knowledge.MaxUploadBytes+1024*1024)
 			provided = request.FormValue("csrf")
 		}
-		if subtleString(provided, current.csrf) == 0 {
+		if subtleString(provided, current.CSRFToken) == 0 {
 			writeAPIError(response, http.StatusForbidden, "CSRF_REJECTED", "요청 검증에 실패했습니다.", false)
 			return
 		}
@@ -186,22 +205,12 @@ func (s *Server) csrf(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) currentSession(request *http.Request) (session, bool) {
+func (s *Server) currentSession(ctx context.Context, request *http.Request) (sessions.Record, bool, error) {
 	cookie, err := request.Cookie(sessionCookie)
 	if err != nil {
-		return session{}, false
+		return sessions.Record{}, false, nil
 	}
-	now := time.Now()
-	s.sessionMu.Lock()
-	defer s.sessionMu.Unlock()
-	current, found := s.sessions[cookie.Value]
-	if !found || now.After(current.expiresAt) {
-		delete(s.sessions, cookie.Value)
-		return session{}, false
-	}
-	current.expiresAt = now.Add(sessionTTL)
-	s.sessions[cookie.Value] = current
-	return current, true
+	return s.sessions.Load(ctx, cookie.Value, time.Now())
 }
 
 func writeJSON(response http.ResponseWriter, status int, value any) {

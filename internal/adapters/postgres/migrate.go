@@ -25,6 +25,9 @@ var fencedProcessingAttemptSchema string
 //go:embed migrations/004_embedding_profile_metadata.sql
 var embeddingProfileMetadataSchema string
 
+//go:embed migrations/005_browser_session.sql
+var browserSessionSchema string
+
 type migration struct {
 	version int
 	name    string
@@ -36,6 +39,7 @@ var migrations = []migration{
 	{version: 2, name: "processing_step_attempt", sql: processingAttemptSchema},
 	{version: 3, name: "fenced_processing_attempt", sql: fencedProcessingAttemptSchema},
 	{version: 4, name: "embedding_profile_metadata", sql: embeddingProfileMetadataSchema},
+	{version: 5, name: "browser_session", sql: browserSessionSchema},
 }
 
 // Open returns a bounded PostgreSQL connection pool after a successful ping.

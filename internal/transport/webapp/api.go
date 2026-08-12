@@ -13,6 +13,7 @@ import (
 
 	"github.com/Merge42-SyncBase/syncbase-was/internal/modules/documents"
 	"github.com/Merge42-SyncBase/syncbase-was/internal/modules/knowledge"
+	"github.com/Merge42-SyncBase/syncbase-was/internal/modules/sessions"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -161,7 +162,7 @@ func (s *Server) apiLogin(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	s.logins.reset(loginKey)
-	current, err := s.issueSession(response)
+	current, err := s.issueSession(request.Context(), response)
 	if err != nil {
 		writeAPIError(response, http.StatusInternalServerError, "INTERNAL", "로그인 세션을 만들지 못했습니다.", true)
 		return
@@ -170,7 +171,11 @@ func (s *Server) apiLogin(response http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) apiSession(response http.ResponseWriter, request *http.Request) {
-	current, ok := s.currentSession(request)
+	current, ok, err := s.currentSession(request.Context(), request)
+	if err != nil {
+		writeAPIError(response, http.StatusServiceUnavailable, "TEMPORARILY_UNAVAILABLE", "세션 저장소를 확인하세요.", true)
+		return
+	}
 	if !ok {
 		writeAPIError(response, http.StatusUnauthorized, "SESSION_EXPIRED", "로그인 세션이 만료되었습니다.", false)
 		return
@@ -179,7 +184,10 @@ func (s *Server) apiSession(response http.ResponseWriter, request *http.Request)
 }
 
 func (s *Server) apiLogout(response http.ResponseWriter, request *http.Request) {
-	s.deleteSession(response, request)
+	if err := s.deleteSession(request.Context(), response, request); err != nil {
+		writeAPIError(response, http.StatusServiceUnavailable, "TEMPORARILY_UNAVAILABLE", "세션 저장소를 확인하세요.", true)
+		return
+	}
 	response.WriteHeader(http.StatusNoContent)
 }
 
@@ -387,11 +395,11 @@ func (s *Server) apiLoadSource(
 	return source, page, true
 }
 
-func (s *Server) sessionResponse(current session) apiSessionResponse {
+func (s *Server) sessionResponse(current sessions.Record) apiSessionResponse {
 	return apiSessionResponse{
 		User:      apiUser{Username: s.config.AdminUsername, Role: "DOCUMENT_ADMIN"},
-		CSRFToken: current.csrf,
-		ExpiresAt: current.expiresAt,
+		CSRFToken: current.CSRFToken,
+		ExpiresAt: current.ExpiresAt,
 	}
 }
 
@@ -438,19 +446,19 @@ func registrationResponse(registration knowledge.Registration) apiRegistrationRe
 	}
 }
 
-func (s *Server) issueSession(response http.ResponseWriter) (session, error) {
+func (s *Server) issueSession(ctx context.Context, response http.ResponseWriter) (sessions.Record, error) {
 	token, err := randomToken()
 	if err != nil {
-		return session{}, err
+		return sessions.Record{}, err
 	}
 	csrf, err := randomToken()
 	if err != nil {
-		return session{}, err
+		return sessions.Record{}, err
 	}
-	current := session{csrf: csrf, expiresAt: time.Now().Add(sessionTTL)}
-	s.sessionMu.Lock()
-	s.sessions[token] = current
-	s.sessionMu.Unlock()
+	current := sessions.Record{CSRFToken: csrf, ExpiresAt: time.Now().Add(sessionTTL)}
+	if err := s.sessions.Create(ctx, token, current); err != nil {
+		return sessions.Record{}, err
+	}
 	http.SetCookie(response, &http.Cookie{
 		Name: sessionCookie, Value: token, Path: "/", MaxAge: int(sessionTTL.Seconds()),
 		HttpOnly: true, Secure: s.config.CookieSecure, SameSite: http.SameSiteLaxMode,
@@ -458,16 +466,17 @@ func (s *Server) issueSession(response http.ResponseWriter) (session, error) {
 	return current, nil
 }
 
-func (s *Server) deleteSession(response http.ResponseWriter, request *http.Request) {
+func (s *Server) deleteSession(ctx context.Context, response http.ResponseWriter, request *http.Request) error {
 	if cookie, err := request.Cookie(sessionCookie); err == nil {
-		s.sessionMu.Lock()
-		delete(s.sessions, cookie.Value)
-		s.sessionMu.Unlock()
+		if err := s.sessions.Delete(ctx, cookie.Value); err != nil {
+			return err
+		}
 	}
 	http.SetCookie(response, &http.Cookie{
 		Name: sessionCookie, Path: "/", MaxAge: -1, HttpOnly: true,
 		Secure: s.config.CookieSecure, SameSite: http.SameSiteLaxMode,
 	})
+	return nil
 }
 
 func (s *Server) writeAPIError(response http.ResponseWriter, err error) {
