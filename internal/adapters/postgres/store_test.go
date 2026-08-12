@@ -238,8 +238,8 @@ func TestMigrateRecordsAndVerifiesChecksums(t *testing.T) {
 		WHERE checksum ~ '^[0-9a-f]{64}$'`).Scan(&migrations); err != nil {
 		t.Fatalf("query migration ledger: %v", err)
 	}
-	if migrations != 4 {
-		t.Fatalf("migration ledger rows = %d, want 4", migrations)
+	if migrations != 5 {
+		t.Fatalf("migration ledger rows = %d, want 5", migrations)
 	}
 	if _, err := pool.Exec(ctx, `
 		UPDATE syncbase.processing_profile

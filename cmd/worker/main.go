@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -53,6 +55,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 	workerID := config.Value("SYNCBASE_WORKER_ID", "worker-1")
+	healthAddress := config.Value("SYNCBASE_WORKER_HEALTH_ADDR", ":8082")
 	profile, _, err := config.Profile()
 	if err != nil {
 		return err
@@ -89,6 +92,22 @@ func run(ctx context.Context) error {
 	}
 	defer embedder.Close()
 	processor := processing.New(store, originals, parser, embedder, profile)
+	healthServer := &http.Server{
+		Addr:              healthAddress,
+		Handler:           newReadinessHandler(store, originals, parser, embedder),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	healthErrors := make(chan error, 1)
+	go func() {
+		if err := healthServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			healthErrors <- fmt.Errorf("worker readiness server: %w", err)
+		}
+	}()
+	defer func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = healthServer.Shutdown(shutdownContext)
+	}()
 	slog.Info("worker ready", "worker_id", workerID, "profile", profile.Fingerprint)
 
 	ticker := time.NewTicker(pollInterval)
@@ -100,6 +119,8 @@ func run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case err := <-healthErrors:
+			return err
 		case <-ticker.C:
 		}
 	}

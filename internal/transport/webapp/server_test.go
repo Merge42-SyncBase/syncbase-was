@@ -6,10 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Merge42-SyncBase/syncbase-was/internal/modules/documents"
 	"github.com/Merge42-SyncBase/syncbase-was/internal/modules/knowledge"
+	"github.com/Merge42-SyncBase/syncbase-was/internal/modules/sessions"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -58,17 +61,85 @@ func TestReadinessDistinguishesLivenessFromDependencyFailure(t *testing.T) {
 	}
 }
 
+func TestSessionSurvivesWebHandlerReplacement(t *testing.T) {
+	store := newMemorySessionStore()
+	first := newTestHandlerWithSessionStore(t, &fixtureDocumentStore{}, store)
+	loginRequest := httptest.NewRequest(
+		http.MethodPost, "/api/v1/session",
+		strings.NewReader(`{"username":"admin","password":"correct horse battery staple"}`),
+	)
+	loginRequest.Header.Set("Content-Type", "application/json")
+	loginResponse := httptest.NewRecorder()
+	first.ServeHTTP(loginResponse, loginRequest)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", loginResponse.Code, loginResponse.Body.String())
+	}
+	cookies := loginResponse.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("login cookies=%d, want 1", len(cookies))
+	}
+
+	second := newTestHandlerWithSessionStore(t, &fixtureDocumentStore{}, store)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/session", nil)
+	request.AddCookie(cookies[0])
+	response := httptest.NewRecorder()
+	second.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("session after handler replacement status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func newTestHandler(t *testing.T, documentStore documentService) http.Handler {
+	return newTestHandlerWithSessionStore(t, documentStore, newMemorySessionStore())
+}
+
+func newTestHandlerWithSessionStore(t *testing.T, documentStore documentService, store sessions.Store) http.Handler {
 	t.Helper()
 	hash, err := bcrypt.GenerateFromPassword([]byte("correct horse battery staple"), bcrypt.MinCost)
 	if err != nil {
 		t.Fatalf("GenerateFromPassword: %v", err)
 	}
-	handler, err := New(Config{AdminUsername: "admin", AdminPasswordBcrypt: string(hash)}, documentStore)
+	handler, err := New(Config{
+		AdminUsername: "admin", AdminPasswordBcrypt: string(hash), Sessions: store,
+	}, documentStore)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return handler
+}
+
+type memorySessionStore struct {
+	mu      sync.Mutex
+	records map[string]sessions.Record
+}
+
+func newMemorySessionStore() *memorySessionStore {
+	return &memorySessionStore{records: make(map[string]sessions.Record)}
+}
+
+func (s *memorySessionStore) Create(_ context.Context, token string, record sessions.Record) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.records[token] = record
+	return nil
+}
+
+func (s *memorySessionStore) Load(_ context.Context, token string, now time.Time) (sessions.Record, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, found := s.records[token]
+	if !found || !record.ExpiresAt.After(now) {
+		delete(s.records, token)
+		return sessions.Record{}, false, nil
+	}
+	return record, true, nil
+}
+
+func (s *memorySessionStore) Delete(_ context.Context, token string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.records, token)
+	return nil
 }
 
 type fixtureDocumentStore struct {

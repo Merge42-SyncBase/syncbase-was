@@ -62,6 +62,10 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	workerReadyURL, err := config.Required("SYNCBASE_WORKER_READY_URL")
+	if err != nil {
+		return err
+	}
 	pool, err := postgres.Open(ctx, databaseURL)
 	if err != nil {
 		return err
@@ -83,7 +87,8 @@ func run(ctx context.Context) error {
 	handler, err := webapp.New(webapp.Config{
 		AdminUsername:       config.Value("SYNCBASE_ADMIN_USERNAME", "admin"),
 		AdminPasswordBcrypt: adminHash, CookieSecure: cookieSecure,
-		MCPURL: mcpURL, MCPToken: mcpToken,
+		MCPURL: mcpURL, MCPToken: mcpToken, WorkerReadyURL: workerReadyURL,
+		Sessions: postgres.NewSessionStore(pool),
 	}, documentService)
 	if err != nil {
 		return err
