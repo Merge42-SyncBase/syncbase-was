@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -33,6 +34,25 @@ func TestReadinessHandlerRequiresAllDependencies(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("GET /readyz status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestNewReadinessServerRejectsAddressAlreadyInUse(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	server, readinessListener, err := newReadinessServer(listener.Addr().String(), readinessFixture{})
+	if err == nil {
+		if readinessListener != nil {
+			_ = readinessListener.Close()
+		}
+		t.Fatal("newReadinessServer() error = nil, want address-in-use error")
+	}
+	if server != nil || readinessListener != nil {
+		t.Fatalf("newReadinessServer() = (%v, %v), want nil resources on error", server, readinessListener)
 	}
 }
 
