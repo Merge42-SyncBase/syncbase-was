@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -79,11 +80,27 @@ func (p *Parser) Ready(ctx context.Context) error {
 
 // ParseFile extracts normalized text from each page of a local PDF.
 func (p *Parser) ParseFile(ctx context.Context, path string) ([]knowledge.PageText, error) {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("read PDF: %w", err)
 	}
+	defer file.Close()
+	data, err := readPDFContent(file, knowledge.MaxUploadBytes)
+	if err != nil {
+		return nil, err
+	}
 	return p.Parse(ctx, data)
+}
+
+func readPDFContent(source io.Reader, maximumSize int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(source, maximumSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("read PDF: %w", err)
+	}
+	if int64(len(data)) > maximumSize {
+		return nil, fmt.Errorf("%w: size", knowledge.ErrInvalidPDF)
+	}
+	return data, nil
 }
 
 // Parse extracts normalized, page-scoped text from one supported PDF.

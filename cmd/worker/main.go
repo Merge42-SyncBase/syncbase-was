@@ -92,15 +92,23 @@ func run(ctx context.Context) error {
 	}
 	defer embedder.Close()
 	processor := processing.New(store, originals, parser, embedder, profile)
-	healthServer := &http.Server{
-		Addr:              healthAddress,
-		Handler:           newReadinessHandler(store, originals, parser, embedder),
-		ReadHeaderTimeout: 5 * time.Second,
+	healthServer, healthListener, err := newReadinessServer(
+		healthAddress,
+		store,
+		originals,
+		parser,
+		embedder,
+	)
+	if err != nil {
+		return err
 	}
+	workerContext, stopWorker := context.WithCancel(ctx)
+	defer stopWorker()
 	healthErrors := make(chan error, 1)
 	go func() {
-		if err := healthServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := healthServer.Serve(healthListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			healthErrors <- fmt.Errorf("worker readiness server: %w", err)
+			stopWorker()
 		}
 	}()
 	defer func() {
@@ -113,7 +121,14 @@ func run(ctx context.Context) error {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	for {
-		if err := poll(ctx, store, processor, workerID); err != nil && !errors.Is(err, context.Canceled) {
+		select {
+		case err := <-healthErrors:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if err := poll(workerContext, store, processor, workerID); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Warn("worker poll deferred", "error", err)
 		}
 		select {

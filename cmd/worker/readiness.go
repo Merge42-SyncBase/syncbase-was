@@ -2,12 +2,27 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"time"
 )
 
 type readyDependency interface {
 	Ready(context.Context) error
+}
+
+func newReadinessServer(address string, dependencies ...readyDependency) (*http.Server, net.Listener, error) {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen worker readiness: %w", err)
+	}
+	server := &http.Server{
+		Addr:              address,
+		Handler:           newReadinessHandler(dependencies...),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	return server, listener, nil
 }
 
 // newReadinessHandler exposes worker liveness separately from its dependencies.
