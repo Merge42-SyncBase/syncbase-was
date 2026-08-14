@@ -1,6 +1,6 @@
 module github.com/Merge42-SyncBase/syncbase-was/qualification/pdf-gate/go
 
-go 1.26.5
+go 1.26.6
 
 require (
 	github.com/klippa-app/go-pdfium v1.19.6
