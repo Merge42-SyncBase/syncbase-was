@@ -3,7 +3,7 @@ module github.com/Merge42-SyncBase/syncbase-was
 go 1.26.6
 
 require (
-	github.com/Merge42-SyncBase/syncbase-embedding v0.0.0
+	github.com/Merge42-SyncBase/syncbase-embedding v0.0.0-20260814131032-ffa628720e63
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/klippa-app/go-pdfium v1.19.6
@@ -11,8 +11,6 @@ require (
 	golang.org/x/crypto v0.54.0
 	golang.org/x/text v0.40.0
 )
-
-replace github.com/Merge42-SyncBase/syncbase-embedding => ../vector-embedding
 
 require (
 	github.com/emirpasic/gods v1.18.1 // indirect
