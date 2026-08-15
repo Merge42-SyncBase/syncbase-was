@@ -93,7 +93,11 @@ jobs:
           go env -w GOPRIVATE=github.com/Merge42-SyncBase/*
           go get github.com/Merge42-SyncBase/syncbase-was@${{ github.sha }}
           go mod tidy
-          go build ./cmd/...
+          # -o /dev/null: ./cmd/... resolves to a single package (cmd/mcp) in
+          # this repo, so a bare `go build ./cmd/...` writes a binary to the
+          # working directory instead of discarding it, which
+          # create-pull-request below would then stage.
+          go build -o /dev/null ./cmd/...
 
       - uses: peter-evans/create-pull-request@v6
         with:
@@ -101,6 +105,9 @@ jobs:
           commit-message: "chore: bump syncbase-was to ${{ github.sha }}"
           branch: chore/bump-syncbase-was
           delete-branch: true
+          add-paths: |
+            go.mod
+            go.sum
           title: "chore: bump syncbase-was"
           body: |
             Auto-generated after a merge to `syncbase-was@main`
