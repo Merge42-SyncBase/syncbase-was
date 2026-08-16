@@ -69,6 +69,8 @@ jobs:
           secrets: |
             github_token=${{ secrets.GH_MODULES_TOKEN }}
           push: true
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
           tags: |
             ghcr.io/merge42-syncbase/${{ matrix.image }}:latest
             ghcr.io/merge42-syncbase/${{ matrix.image }}:sha-${{ steps.vars.outputs.sha_short }}
