@@ -3,7 +3,7 @@ module github.com/Merge42-SyncBase/syncbase-was
 go 1.26.6
 
 require (
-	github.com/Merge42-SyncBase/syncbase-embedding v0.0.0-20260815154117-d7b26f5c2d52
+	github.com/Merge42-SyncBase/syncbase-embedding v0.0.0-20260815171426-2dff15641022
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/klippa-app/go-pdfium v1.19.6
