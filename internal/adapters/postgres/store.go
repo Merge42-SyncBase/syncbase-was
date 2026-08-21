@@ -764,6 +764,11 @@ func (s *Store) Finalize(ctx context.Context, claimed knowledge.ClaimedRun, page
 
 // Fail terminates a run without exposing unsafe error details. The fencing
 // predicate prevents an expired worker from overwriting a newer attempt.
+//
+// Retriable failure codes (TEMPORARILY_UNAVAILABLE, INTERNAL) are re-queued on
+// attempts 1 and 2 with +1s / +5s backoff; on attempt 3 they are renamed to
+// TRANSIENT_EXHAUSTED so the operator can trigger a manual retry. Non-retriable
+// codes (e.g. INVALID_INPUT, PROFILE_MISMATCH) still fail immediately.
 func (s *Store) Fail(ctx context.Context, claimed knowledge.ClaimedRun, stage knowledge.Stage, code string) error {
 	if err := validateClaimed(claimed); err != nil || !validStage(stage) ||
 		strings.TrimSpace(code) == "" || len(code) > 100 {
@@ -777,7 +782,7 @@ func (s *Store) Fail(ctx context.Context, claimed knowledge.ClaimedRun, stage kn
 	if err := verifyWritableClaim(ctx, tx, claimed); err != nil {
 		return err
 	}
-	if code == "TEMPORARILY_UNAVAILABLE" && claimed.AutomaticAttempt < 3 {
+	if isRetriableFailureCode(code) && claimed.AutomaticAttempt < 3 {
 		delaySeconds := 1
 		if claimed.AutomaticAttempt == 2 {
 			delaySeconds = 5
@@ -807,7 +812,7 @@ func (s *Store) Fail(ctx context.Context, claimed knowledge.ClaimedRun, stage kn
 		}
 		return nil
 	}
-	if code == "TEMPORARILY_UNAVAILABLE" {
+	if isRetriableFailureCode(code) {
 		code = "TRANSIENT_EXHAUSTED"
 	}
 	result, err := tx.Exec(ctx, `
@@ -1050,6 +1055,14 @@ func validStage(stage knowledge.Stage) bool {
 		}
 	}
 	return false
+}
+
+// isRetriableFailureCode reports whether a failure code is eligible for
+// automatic retry. TEMPORARILY_UNAVAILABLE (transient DB/IO blip) and
+// INTERNAL (infra-side fault, e.g. object-store read miss, closed parser
+// instance) both retry with backoff; INVALID_INPUT and PROFILE_MISMATCH do not.
+func isRetriableFailureCode(code string) bool {
+	return code == "TEMPORARILY_UNAVAILABLE" || code == "INTERNAL"
 }
 
 func validateClaimed(claimed knowledge.ClaimedRun) error {

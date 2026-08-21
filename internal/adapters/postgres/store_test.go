@@ -13,6 +13,97 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+func TestInternalFailureRetriesSameRunThenExhausts(t *testing.T) {
+	databaseURL := os.Getenv("SYNCBASE_TEST_DB_URL")
+	if databaseURL == "" {
+		t.Skip("SYNCBASE_TEST_DB_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := postgres.Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	profile, canonical, err := knowledge.NewProfile(
+		"ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665",
+		"0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
+		"onnxruntime-1.26.0",
+		0.62,
+	)
+	if err != nil {
+		t.Fatalf("NewProfile: %v", err)
+	}
+	if err := postgres.Migrate(ctx, pool, profile, canonical); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	resetStoreFixtures(t, ctx, pool)
+	store := postgres.NewStore(pool)
+	name, err := knowledge.NewDocumentName("잠재 결함: INTERNAL 리트라이")
+	if err != nil {
+		t.Fatalf("NewDocumentName: %v", err)
+	}
+	registered, err := store.Register(ctx, knowledge.RegisterCommand{
+		RequestKey:       "internal-retry-v1",
+		Operation:        knowledge.RegisterNewDocument,
+		DocumentName:     name,
+		ContentSHA256:    "9fe7058ff1630cefff78883aa69066d06f81af9b4daeeb7d36bd9aae9ecf95a8",
+		ByteSize:         1234,
+		OriginalFileName: "internal-retry.pdf",
+		StorageKey:       "9f/e7/9fe7058f.pdf",
+	})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	first, err := store.ClaimNext(ctx, "worker-internal-test")
+	if err != nil || first == nil {
+		t.Fatalf("ClaimNext first: run=%+v err=%v", first, err)
+	}
+	if first.RunID != registered.RunID || first.AutomaticAttempt != 1 {
+		t.Fatalf("first claim = %+v, want run=%s attempt=1", first, registered.RunID)
+	}
+	if err := store.Fail(ctx, *first, knowledge.StageParse, "INTERNAL"); err != nil {
+		t.Fatalf("Fail first INTERNAL attempt: %v", err)
+	}
+
+	second := waitForClaim(t, ctx, store, "worker-internal-test", 2*time.Second)
+	if second.RunID != first.RunID || second.AutomaticAttempt != 2 {
+		t.Fatalf("second claim = %+v, want same run attempt=2 (INTERNAL should retry)", second)
+	}
+	if err := store.Fail(ctx, *second, knowledge.StageParse, "INTERNAL"); err != nil {
+		t.Fatalf("Fail second INTERNAL attempt: %v", err)
+	}
+
+	third := waitForClaim(t, ctx, store, "worker-internal-test", 6*time.Second)
+	if third.RunID != first.RunID || third.AutomaticAttempt != 3 {
+		t.Fatalf("third claim = %+v, want same run attempt=3", third)
+	}
+	if err := store.Fail(ctx, *third, knowledge.StageParse, "INTERNAL"); err != nil {
+		t.Fatalf("Fail exhausted INTERNAL attempt: %v", err)
+	}
+	details, err := store.GetDocument(ctx, registered.DocumentID)
+	if err != nil {
+		t.Fatalf("GetDocument: %v", err)
+	}
+	if len(details.Versions) != 1 {
+		t.Fatalf("versions=%d, want 1", len(details.Versions))
+	}
+	version := details.Versions[0]
+	if version.Status != knowledge.VersionFailed {
+		t.Fatalf("exhausted INTERNAL version status = %s, want FAILED", version.Status)
+	}
+	if version.ErrorCode != "TRANSIENT_EXHAUSTED" {
+		t.Fatalf("exhausted INTERNAL version error_code = %s, want TRANSIENT_EXHAUSTED", version.ErrorCode)
+	}
+	if !version.ManualRetryAllowed {
+		t.Fatalf("exhausted INTERNAL version should allow manual retry, got %+v", version)
+	}
+	if version.AutomaticAttempts != 3 {
+		t.Fatalf("exhausted INTERNAL version attempts = %d, want 3", version.AutomaticAttempts)
+	}
+}
+
 func TestTransientFailureRetriesSameRunThreeTimesBeforeManualRecovery(t *testing.T) {
 	databaseURL := os.Getenv("SYNCBASE_TEST_DB_URL")
 	if databaseURL == "" {
