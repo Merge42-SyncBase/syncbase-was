@@ -110,7 +110,7 @@ func Open(ctx context.Context, runtimeConfig Config) (*Runtime, error) {
 		pool.Close()
 		return nil, err
 	}
-	searchService, err := search.New(store, embedder, profile, runtimeConfig.PublicBaseURL)
+	searchService, err := search.New(store, embedder, profile, runtimeConfig.PublicBaseURL, true)
 	if err != nil {
 		_ = embedder.Close()
 		pool.Close()
