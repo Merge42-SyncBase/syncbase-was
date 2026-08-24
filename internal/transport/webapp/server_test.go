@@ -150,6 +150,9 @@ type fixtureDocumentStore struct {
 func (s *fixtureDocumentStore) ListDocuments(context.Context, int, int) ([]knowledge.DocumentSummary, error) {
 	return s.documents, nil
 }
+func (*fixtureDocumentStore) FindNameMatches(context.Context, string, int) (documents.NameMatches, error) {
+	return documents.NameMatches{}, nil
+}
 func (*fixtureDocumentStore) GetDocument(context.Context, uuid.UUID) (knowledge.DocumentDetails, error) {
 	return knowledge.DocumentDetails{}, knowledge.ErrNotFound
 }

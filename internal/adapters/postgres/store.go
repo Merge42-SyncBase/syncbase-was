@@ -176,6 +176,55 @@ func (s *Store) ListDocuments(ctx context.Context, limit, offset int) ([]knowled
 	return result, nil
 }
 
+// FindDocumentsByNormalizedName returns a bounded newest-first sample and the
+// total number of exact normalized-name matches. Display names are not unique.
+func (s *Store) FindDocumentsByNormalizedName(
+	ctx context.Context,
+	normalizedName string,
+	limit int,
+) ([]knowledge.DocumentSummary, int, error) {
+	if strings.TrimSpace(normalizedName) == "" || limit < 1 || limit > 10 {
+		return nil, 0, knowledge.ErrInvalidArgument
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT d.id, d.display_name, active.version_number,
+		       latest.version_number, latest.status, d.updated_at,
+		       count(*) OVER ()
+		FROM syncbase.document d
+		LEFT JOIN syncbase.document_version active ON active.id=d.active_version_id
+		LEFT JOIN LATERAL (
+			SELECT version_number,status FROM syncbase.document_version
+			WHERE document_id=d.id ORDER BY version_number DESC LIMIT 1
+		) latest ON true
+		WHERE d.normalized_name=$1
+		ORDER BY d.updated_at DESC,d.id ASC LIMIT $2`, normalizedName, limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("find documents by normalized name: %w", err)
+	}
+	defer rows.Close()
+	result := make([]knowledge.DocumentSummary, 0)
+	total := 0
+	for rows.Next() {
+		var item knowledge.DocumentSummary
+		var active pgtype.Int4
+		if err := rows.Scan(
+			&item.ID, &item.Name, &active, &item.LatestVersion, &item.LatestStatus,
+			&item.UpdatedAt, &total,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scan normalized-name document: %w", err)
+		}
+		if active.Valid {
+			value := int(active.Int32)
+			item.ActiveVersion = &value
+		}
+		result = append(result, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate normalized-name documents: %w", err)
+	}
+	return result, total, nil
+}
+
 // GetDocument returns one document and its newest-first version history.
 func (s *Store) GetDocument(ctx context.Context, documentID uuid.UUID) (knowledge.DocumentDetails, error) {
 	if documentID == uuid.Nil {

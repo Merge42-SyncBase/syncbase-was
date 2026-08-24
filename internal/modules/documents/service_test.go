@@ -44,6 +44,50 @@ func TestRegisterPersistsValidatedOriginal(t *testing.T) {
 	}
 }
 
+func TestFindNameMatchesNormalizesForNonBlockingDuplicateGuidance(t *testing.T) {
+	t.Parallel()
+
+	documentID := uuid.New()
+	repository := &fixtureRepository{
+		nameMatchDocuments: []knowledge.DocumentSummary{{
+			ID: documentID, Name: "보안 정책", LatestVersion: 2,
+			LatestStatus: knowledge.VersionActive,
+		}},
+		nameMatchTotal: 3,
+	}
+	service := newFixtureService(t, repository, &fixtureOriginalStore{}, &fixtureParser{})
+
+	matches, err := service.FindNameMatches(context.Background(), "  보안   정책  ", 2)
+	if err != nil {
+		t.Fatalf("FindNameMatches: %v", err)
+	}
+	if repository.matchedNormalizedName != "보안 정책" || repository.nameMatchLimit != 2 {
+		t.Fatalf("repository lookup name=%q limit=%d", repository.matchedNormalizedName, repository.nameMatchLimit)
+	}
+	if matches.NormalizedName != "보안 정책" || matches.Total != 3 ||
+		len(matches.Documents) != 1 || matches.Documents[0].ID != documentID {
+		t.Fatalf("matches=%+v", matches)
+	}
+}
+
+func TestFindNameMatchesRejectsInvalidNameOrLimit(t *testing.T) {
+	t.Parallel()
+
+	service := newFixtureService(t, &fixtureRepository{}, &fixtureOriginalStore{}, &fixtureParser{})
+	for _, test := range []struct {
+		name  string
+		limit int
+	}{
+		{name: "   ", limit: 3},
+		{name: "보안 정책", limit: 0},
+		{name: "보안 정책", limit: 11},
+	} {
+		if _, err := service.FindNameMatches(context.Background(), test.name, test.limit); !errors.Is(err, knowledge.ErrInvalidArgument) {
+			t.Errorf("FindNameMatches(%q, %d) error=%v, want ErrInvalidArgument", test.name, test.limit, err)
+		}
+	}
+}
+
 func TestRegisterRemovesUnreferencedOriginalAfterDatabaseFailure(t *testing.T) {
 	t.Parallel()
 
@@ -150,17 +194,27 @@ func newFixtureService(
 }
 
 type fixtureRepository struct {
-	command         knowledge.RegisterCommand
-	registration    knowledge.Registration
-	registerErr     error
-	referenced      bool
-	referenceErr    error
-	referenceChecks int
-	readyErr        error
+	command               knowledge.RegisterCommand
+	registration          knowledge.Registration
+	registerErr           error
+	referenced            bool
+	referenceErr          error
+	referenceChecks       int
+	readyErr              error
+	nameMatchDocuments    []knowledge.DocumentSummary
+	nameMatchTotal        int
+	matchedNormalizedName string
+	nameMatchLimit        int
 }
 
 func (r *fixtureRepository) ListDocuments(context.Context, int, int) ([]knowledge.DocumentSummary, error) {
 	return nil, nil
+}
+
+func (r *fixtureRepository) FindDocumentsByNormalizedName(_ context.Context, normalizedName string, limit int) ([]knowledge.DocumentSummary, int, error) {
+	r.matchedNormalizedName = normalizedName
+	r.nameMatchLimit = limit
+	return r.nameMatchDocuments, r.nameMatchTotal, nil
 }
 
 func (r *fixtureRepository) GetDocument(context.Context, uuid.UUID) (knowledge.DocumentDetails, error) {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -34,6 +35,13 @@ func TestAPIAdminSessionAndDocumentProjection(t *testing.T) {
 				PageCount: 3, CreatedAt: updatedAt, UpdatedAt: updatedAt,
 			}},
 		},
+		nameMatches: documents.NameMatches{
+			NormalizedName: "정보보안 정책", Total: 2,
+			Documents: []knowledge.DocumentSummary{{
+				ID: documentID, Name: "정보보안 정책", LatestVersion: 2,
+				LatestStatus: knowledge.VersionActive, ActiveVersion: pointer(2), UpdatedAt: updatedAt,
+			}},
+		},
 	}
 	server := httptest.NewServer(newTestHandler(t, store))
 	t.Cleanup(server.Close)
@@ -55,6 +63,19 @@ func TestAPIAdminSessionAndDocumentProjection(t *testing.T) {
 	if len(list.Documents) != 1 || list.Documents[0].ID != documentID || list.Documents[0].ActiveVersion == nil ||
 		*list.Documents[0].ActiveVersion != 2 {
 		t.Fatalf("unexpected document projection: %#v", list)
+	}
+
+	response = getAPI(t, client, server.URL+"/api/v1/documents/name-matches?name="+url.QueryEscape(" 정보보안   정책 "))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("name matches status=%d body=%s", response.StatusCode, body)
+	}
+	var matches apiDocumentNameMatchesResponse
+	decodeResponse(t, response, &matches)
+	if matches.NormalizedName != "정보보안 정책" || matches.Total != 2 ||
+		len(matches.Documents) != 1 || matches.Documents[0].ID != documentID {
+		t.Fatalf("unexpected name matches projection: %#v", matches)
 	}
 
 	response = getAPI(t, client, server.URL+"/api/v1/documents/"+documentID.String())
@@ -88,6 +109,18 @@ func TestAPISessionRequiresCookieAndCSRFForMutation(t *testing.T) {
 	decodeResponse(t, response, &anonymous)
 	if anonymous.Error.Code != "SESSION_EXPIRED" {
 		t.Fatalf("anonymous error=%#v", anonymous)
+	}
+
+	response = getAPI(t, http.DefaultClient, server.URL+"/api/v1/documents/name-matches?name=policy")
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("anonymous name matches status=%d body=%s", response.StatusCode, body)
+	}
+	var anonymousNameMatches apiError
+	decodeResponse(t, response, &anonymousNameMatches)
+	if anonymousNameMatches.Error.Code != "SESSION_EXPIRED" {
+		t.Fatalf("anonymous name matches error=%#v", anonymousNameMatches)
 	}
 
 	client := newCookieClient(t)
@@ -286,6 +319,7 @@ func pointer(value int) *int {
 
 type apiFixtureDocumentStore struct {
 	list         []knowledge.DocumentSummary
+	nameMatches  documents.NameMatches
 	details      knowledge.DocumentDetails
 	preflight    documents.Preflight
 	registration knowledge.Registration
@@ -297,6 +331,10 @@ type apiFixtureDocumentStore struct {
 
 func (s *apiFixtureDocumentStore) ListDocuments(context.Context, int, int) ([]knowledge.DocumentSummary, error) {
 	return s.list, nil
+}
+
+func (s *apiFixtureDocumentStore) FindNameMatches(context.Context, string, int) (documents.NameMatches, error) {
+	return s.nameMatches, nil
 }
 
 func (s *apiFixtureDocumentStore) GetDocument(context.Context, uuid.UUID) (knowledge.DocumentDetails, error) {

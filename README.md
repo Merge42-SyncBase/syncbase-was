@@ -26,6 +26,7 @@ go vet ./...
 | `POST` | `/api/v1/session` | 관리자 로그인 |
 | `GET`, `DELETE` | `/api/v1/session` | 세션 조회·로그아웃 |
 | `GET`, `POST` | `/api/v1/documents` | 문서 목록·PDF 등록 |
+| `GET` | `/api/v1/documents/name-matches?name={name}` | 새 Document 등록 전 정규화된 동일 이름 안내 |
 | `GET` | `/api/v1/documents/{id}` | 문서 및 버전 처리 상태 |
 | `POST` | `/api/v1/documents/{id}/versions` | 새 PDF 버전 등록 |
 | `POST` | `/api/v1/uploads/preflight` | 서버 PDF 검사·SHA-256·페이지 수 |

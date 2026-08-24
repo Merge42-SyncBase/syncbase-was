@@ -773,6 +773,33 @@ func TestRegisterDocumentIsAtomicAndIdempotent(t *testing.T) {
 	if err != nil || len(hits) != 1 || hits[0].DocumentVersion != 3 {
 		t.Fatalf("search retried v3: hits=%+v err=%v", hits, err)
 	}
+
+	duplicateName, err := knowledge.NewDocumentName("  보안   정책  ")
+	if err != nil {
+		t.Fatalf("NewDocumentName duplicate: %v", err)
+	}
+	duplicate, err := store.Register(ctx, knowledge.RegisterCommand{
+		RequestKey:       "request-register-separate-same-name",
+		Operation:        knowledge.RegisterNewDocument,
+		DocumentName:     duplicateName,
+		ContentSHA256:    "9ff686cd2bf183215f3bcbfa3a7bf13ac1398ba4c11537d635962f1455e7f4b7",
+		ByteSize:         4567,
+		OriginalFileName: "separate-security-policy.pdf",
+		StorageKey:       "9f/f6/9ff686cd.pdf",
+	})
+	if err != nil {
+		t.Fatalf("Register separate Document with matching name: %v", err)
+	}
+	if duplicate.DocumentID == first.DocumentID {
+		t.Fatal("separate same-name registration reused the existing Document ID")
+	}
+	matches, total, err := store.FindDocumentsByNormalizedName(ctx, duplicateName.Normalized, 1)
+	if err != nil {
+		t.Fatalf("FindDocumentsByNormalizedName: %v", err)
+	}
+	if total != 2 || len(matches) != 1 {
+		t.Fatalf("same-name matches total=%d returned=%d, want total=2 returned=1", total, len(matches))
+	}
 }
 
 func resetStoreFixtures(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {

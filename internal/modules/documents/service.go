@@ -17,10 +17,14 @@ import (
 	"github.com/google/uuid"
 )
 
-const cleanupTimeout = 5 * time.Second
+const (
+	cleanupTimeout    = 5 * time.Second
+	maxNameMatchLimit = 10
+)
 
 type repository interface {
 	ListDocuments(context.Context, int, int) ([]knowledge.DocumentSummary, error)
+	FindDocumentsByNormalizedName(context.Context, string, int) ([]knowledge.DocumentSummary, int, error)
 	GetDocument(context.Context, uuid.UUID) (knowledge.DocumentDetails, error)
 	GetSource(context.Context, uuid.UUID, int) (knowledge.SourceDocument, error)
 	RecoverRegistration(context.Context, string) (knowledge.UploadRecovery, error)
@@ -49,6 +53,14 @@ type Preflight struct {
 	PageCount     int
 	SHA256        string
 	SuggestedName string
+}
+
+// NameMatches describes existing Documents whose normalized display name is
+// equal to a proposed name. Matches are guidance only and never block creation.
+type NameMatches struct {
+	NormalizedName string
+	Total          int
+	Documents      []knowledge.DocumentSummary
 }
 
 // RegisterCommand contains the user intent and uploaded PDF for one registration.
@@ -151,6 +163,20 @@ func (s *Service) Register(ctx context.Context, command RegisterCommand) (knowle
 // ListDocuments returns one bounded page of documents.
 func (s *Service) ListDocuments(ctx context.Context, limit, offset int) ([]knowledge.DocumentSummary, error) {
 	return s.repository.ListDocuments(ctx, limit, offset)
+}
+
+// FindNameMatches returns bounded, exact normalized-name matches so callers can
+// distinguish creating a separate Document from adding a Version.
+func (s *Service) FindNameMatches(ctx context.Context, value string, limit int) (NameMatches, error) {
+	name, err := knowledge.NewDocumentName(value)
+	if err != nil || limit < 1 || limit > maxNameMatchLimit {
+		return NameMatches{}, knowledge.ErrInvalidArgument
+	}
+	documents, total, err := s.repository.FindDocumentsByNormalizedName(ctx, name.Normalized, limit)
+	if err != nil {
+		return NameMatches{}, err
+	}
+	return NameMatches{NormalizedName: name.Normalized, Total: total, Documents: documents}, nil
 }
 
 // GetDocument returns document details and version history.
