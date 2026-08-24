@@ -46,6 +46,7 @@ type Config struct {
 
 type documentService interface {
 	ListDocuments(context.Context, int, int) ([]knowledge.DocumentSummary, error)
+	FindNameMatches(context.Context, string, int) (documents.NameMatches, error)
 	GetDocument(context.Context, uuid.UUID) (knowledge.DocumentDetails, error)
 	Preflight(context.Context, string, []byte) (documents.Preflight, error)
 	Register(context.Context, documents.RegisterCommand) (knowledge.Registration, error)
@@ -112,6 +113,7 @@ func New(config Config, documents documentService) (http.Handler, error) {
 	mux.Handle("GET /api/v1/session", server.auth(http.HandlerFunc(server.apiSession)))
 	mux.Handle("DELETE /api/v1/session", server.auth(server.csrf(http.HandlerFunc(server.apiLogout))))
 	mux.Handle("GET /api/v1/documents", server.auth(http.HandlerFunc(server.apiListDocuments)))
+	mux.Handle("GET /api/v1/documents/name-matches", server.auth(http.HandlerFunc(server.apiDocumentNameMatches)))
 	mux.Handle("GET /api/v1/documents/{documentID}", server.auth(http.HandlerFunc(server.apiDocument)))
 	mux.Handle("POST /api/v1/documents", server.auth(server.csrf(http.HandlerFunc(server.apiRegisterDocument))))
 	mux.Handle("POST /api/v1/documents/{documentID}/versions", server.auth(server.csrf(http.HandlerFunc(server.apiRegisterVersion))))

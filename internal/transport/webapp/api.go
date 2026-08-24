@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	defaultDocumentLimit = 50
-	maxDocumentLimit     = 100
-	defaultSearchLimit   = 10
+	defaultDocumentLimit  = 50
+	maxDocumentLimit      = 100
+	defaultNameMatchLimit = 3
+	defaultSearchLimit    = 10
 )
 
 type apiError struct {
@@ -54,6 +55,12 @@ type apiDocumentListResponse struct {
 	Documents []apiDocumentSummary `json:"documents"`
 	Limit     int                  `json:"limit"`
 	Offset    int                  `json:"offset"`
+}
+
+type apiDocumentNameMatchesResponse struct {
+	NormalizedName string               `json:"normalizedName"`
+	Total          int                  `json:"total"`
+	Documents      []apiDocumentSummary `json:"documents"`
 }
 
 type apiDocumentSummary struct {
@@ -216,6 +223,29 @@ func (s *Server) apiListDocuments(response http.ResponseWriter, request *http.Re
 		}
 	}
 	writeJSON(response, http.StatusOK, apiDocumentListResponse{Documents: result, Limit: limit, Offset: offset})
+}
+
+func (s *Server) apiDocumentNameMatches(response http.ResponseWriter, request *http.Request) {
+	matches, err := s.documents.FindNameMatches(
+		request.Context(), request.URL.Query().Get("name"), defaultNameMatchLimit,
+	)
+	if err != nil {
+		s.writeAPIError(response, err)
+		return
+	}
+	result := make([]apiDocumentSummary, len(matches.Documents))
+	for index, document := range matches.Documents {
+		result[index] = apiDocumentSummary{
+			ID: document.ID, Name: document.Name, ActiveVersion: document.ActiveVersion,
+			LatestVersion: document.LatestVersion, LatestStatus: document.LatestStatus,
+			UpdatedAt: document.UpdatedAt,
+		}
+	}
+	writeJSON(response, http.StatusOK, apiDocumentNameMatchesResponse{
+		NormalizedName: matches.NormalizedName,
+		Total:          matches.Total,
+		Documents:      result,
+	})
 }
 
 func (s *Server) apiDocument(response http.ResponseWriter, request *http.Request) {
