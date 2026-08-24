@@ -214,14 +214,7 @@ func (s *Server) apiListDocuments(response http.ResponseWriter, request *http.Re
 		s.writeAPIError(response, err)
 		return
 	}
-	result := make([]apiDocumentSummary, len(documents))
-	for index, document := range documents {
-		result[index] = apiDocumentSummary{
-			ID: document.ID, Name: document.Name, ActiveVersion: document.ActiveVersion,
-			LatestVersion: document.LatestVersion, LatestStatus: document.LatestStatus,
-			UpdatedAt: document.UpdatedAt,
-		}
-	}
+	result := documentSummaries(documents)
 	writeJSON(response, http.StatusOK, apiDocumentListResponse{Documents: result, Limit: limit, Offset: offset})
 }
 
@@ -233,19 +226,24 @@ func (s *Server) apiDocumentNameMatches(response http.ResponseWriter, request *h
 		s.writeAPIError(response, err)
 		return
 	}
-	result := make([]apiDocumentSummary, len(matches.Documents))
-	for index, document := range matches.Documents {
+	result := documentSummaries(matches.Documents)
+	writeJSON(response, http.StatusOK, apiDocumentNameMatchesResponse{
+		NormalizedName: matches.NormalizedName,
+		Total:          matches.Total,
+		Documents:      result,
+	})
+}
+
+func documentSummaries(documents []knowledge.DocumentSummary) []apiDocumentSummary {
+	result := make([]apiDocumentSummary, len(documents))
+	for index, document := range documents {
 		result[index] = apiDocumentSummary{
 			ID: document.ID, Name: document.Name, ActiveVersion: document.ActiveVersion,
 			LatestVersion: document.LatestVersion, LatestStatus: document.LatestStatus,
 			UpdatedAt: document.UpdatedAt,
 		}
 	}
-	writeJSON(response, http.StatusOK, apiDocumentNameMatchesResponse{
-		NormalizedName: matches.NormalizedName,
-		Total:          matches.Total,
-		Documents:      result,
-	})
+	return result
 }
 
 func (s *Server) apiDocument(response http.ResponseWriter, request *http.Request) {
