@@ -39,3 +39,11 @@ go vet ./...
 모든 검색 결과는 `document_id`, `version_id`, `document_version`, `page_number`,
 `snippet`, `source_url`을 포함한다. PostgreSQL/OpenSQL 저장소는 활성 버전만 검색하며,
 낮은 버전의 늦은 완료는 `SUPERSEDED`로 끝나므로 이전 검색 결과를 되살릴 수 없다.
+
+## License
+
+SyncBase WAS의 자체 소스는 [Apache License 2.0](LICENSE)
+(`Apache-2.0`)으로 배포합니다.
+PDFium WebAssembly, Go PDFium binding, pgvector client를 포함한 외부
+구성요소의 라이선스와 출처는
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 기록합니다.
