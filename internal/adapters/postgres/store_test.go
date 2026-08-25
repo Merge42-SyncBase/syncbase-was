@@ -10,8 +10,120 @@ import (
 
 	"github.com/Merge42-SyncBase/syncbase-was/internal/adapters/postgres"
 	"github.com/Merge42-SyncBase/syncbase-was/internal/modules/knowledge"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestRegistrationIsPendingBeforeCompletionAndDoesNotShareTheWorkerQueueLock(t *testing.T) {
+	databaseURL := os.Getenv("SYNCBASE_TEST_DB_URL")
+	if databaseURL == "" {
+		t.Skip("SYNCBASE_TEST_DB_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := postgres.Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	profile, canonical, err := knowledge.NewProfile(
+		"ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665",
+		"0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
+		"onnxruntime-1.26.0",
+		0.62,
+	)
+	if err != nil {
+		t.Fatalf("NewProfile: %v", err)
+	}
+	if err := postgres.Migrate(ctx, pool, profile, canonical); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	resetStoreFixtures(t, ctx, pool)
+	store := postgres.NewStore(pool)
+	reservation := knowledge.ReserveUploadCommand{
+		RequestKey: "pending-without-worker-lock", Operation: knowledge.RegisterNewDocument,
+		ContentSHA256: "afe7058ff1630cefff78883aa69066d06f81af9b4daeeb7d36bd9aae9ecf95a8",
+		ByteSize:      1234,
+	}
+	reserved, err := store.ReserveRegistration(ctx, reservation)
+	if err != nil || reserved.State != knowledge.UploadPending {
+		t.Fatalf("ReserveRegistration = %+v, error=%v, want pending", reserved, err)
+	}
+	recovered, err := store.RecoverRegistration(ctx, reservation.RequestKey)
+	if err != nil || recovered.State != knowledge.UploadPending {
+		t.Fatalf("RecoverRegistration = %+v, error=%v, want pending", recovered, err)
+	}
+	expiringReservation := knowledge.ReserveUploadCommand{
+		RequestKey: "definitive-input-rejection", Operation: knowledge.RegisterNewDocument,
+		ContentSHA256: "cfe7058ff1630cefff78883aa69066d06f81af9b4daeeb7d36bd9aae9ecf95a8",
+		ByteSize:      1234,
+	}
+	if _, err := store.ReserveRegistration(ctx, expiringReservation); err != nil {
+		t.Fatalf("reserve definitive rejection: %v", err)
+	}
+	if err := store.ExpireRegistration(ctx, expiringReservation); err != nil {
+		t.Fatalf("ExpireRegistration: %v", err)
+	}
+	expired, err := store.RecoverRegistration(ctx, expiringReservation.RequestKey)
+	if err != nil || expired.State != knowledge.UploadExpired {
+		t.Fatalf("RecoverRegistration after expiration = %+v, error=%v, want expired", expired, err)
+	}
+
+	workerTransaction, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatalf("begin worker transaction: %v", err)
+	}
+	defer func() { _ = workerTransaction.Rollback(ctx) }()
+	if _, err := workerTransaction.Exec(ctx, "SELECT next_fencing_token FROM syncbase.queue_control WHERE singleton=true FOR UPDATE"); err != nil {
+		t.Fatalf("hold worker queue lock: %v", err)
+	}
+	name, err := knowledge.NewDocumentName("독립 등록 잠금")
+	if err != nil {
+		t.Fatalf("NewDocumentName: %v", err)
+	}
+	registrationContext, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	registered, err := store.Register(registrationContext, knowledge.RegisterCommand{
+		RequestKey: reservation.RequestKey, Operation: reservation.Operation,
+		DocumentName: name, ContentSHA256: reservation.ContentSHA256, ByteSize: reservation.ByteSize,
+		OriginalFileName: "independent-lock.pdf", StorageKey: "af/e7/afe7058f.pdf",
+	})
+	if err != nil {
+		t.Fatalf("Register while worker queue lock is held: %v", err)
+	}
+	if registered.DocumentID == [16]byte{} {
+		t.Fatal("Register returned an empty Document ID")
+	}
+
+	blockedReservation := knowledge.ReserveUploadCommand{
+		RequestKey: "bounded-registration-lock", Operation: knowledge.RegisterNewDocument,
+		ContentSHA256: "bfe7058ff1630cefff78883aa69066d06f81af9b4daeeb7d36bd9aae9ecf95a8",
+		ByteSize:      1234,
+	}
+	if _, err := store.ReserveRegistration(ctx, blockedReservation); err != nil {
+		t.Fatalf("reserve bounded-lock request: %v", err)
+	}
+	uploadTransaction, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatalf("begin upload-lock transaction: %v", err)
+	}
+	defer func() { _ = uploadTransaction.Rollback(ctx) }()
+	if _, err := uploadTransaction.Exec(ctx, "SELECT request_key FROM syncbase.upload_request WHERE request_key=$1 FOR UPDATE", blockedReservation.RequestKey); err != nil {
+		t.Fatalf("hold upload request lock: %v", err)
+	}
+	started := time.Now()
+	_, err = store.Register(context.Background(), knowledge.RegisterCommand{
+		RequestKey: blockedReservation.RequestKey, Operation: blockedReservation.Operation,
+		DocumentName: name, ContentSHA256: blockedReservation.ContentSHA256, ByteSize: blockedReservation.ByteSize,
+		OriginalFileName: "bounded-lock.pdf", StorageKey: "bf/e7/bfe7058f.pdf",
+	})
+	elapsed := time.Since(started)
+	if !errors.Is(err, knowledge.ErrTemporarilyUnavailable) {
+		t.Fatalf("Register behind upload lock error=%v, want retryable temporary error", err)
+	}
+	if elapsed >= 6*time.Second {
+		t.Fatalf("Register behind upload lock took %s, want bounded failure before 6s", elapsed)
+	}
+}
 
 func TestInternalFailureRetriesSameRunThenExhausts(t *testing.T) {
 	databaseURL := os.Getenv("SYNCBASE_TEST_DB_URL")

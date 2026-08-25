@@ -20,6 +20,8 @@ func TestDatabaseErrorClassifiesDependencyOutages(t *testing.T) {
 		{name: "connection exception", err: &pgconn.PgError{Code: "08006"}},
 		{name: "administrator shutdown", err: &pgconn.PgError{Code: "57P01"}},
 		{name: "serialization failure", err: &pgconn.PgError{Code: "40001"}},
+		{name: "lock timeout", err: &pgconn.PgError{Code: "55P03"}},
+		{name: "statement timeout", err: &pgconn.PgError{Code: "57014"}},
 	}
 	for _, test := range tests {
 		test := test

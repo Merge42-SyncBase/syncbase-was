@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/Merge42-SyncBase/syncbase-was/internal/modules/knowledge"
 	"github.com/google/uuid"
@@ -19,6 +21,11 @@ import (
 const maxLiveRuns = 21
 
 const chunkInsertBatchSize = 64
+
+const (
+	registrationLockTimeout      = "3s"
+	registrationStatementTimeout = "15s"
+)
 
 // Store implements document, processing, and search persistence in PostgreSQL.
 type Store struct {
@@ -38,39 +45,153 @@ func (s *Store) Ready(ctx context.Context) error {
 	return nil
 }
 
+// ReserveRegistration durably records the idempotency identity before parsing
+// or Original storage. A recovery request can therefore distinguish a genuine
+// in-flight registration from a request that never reached the API.
+func (s *Store) ReserveRegistration(ctx context.Context, command knowledge.ReserveUploadCommand) (knowledge.UploadRecovery, error) {
+	if err := validateReservation(command); err != nil {
+		return knowledge.UploadRecovery{}, err
+	}
+	started := time.Now()
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return knowledge.UploadRecovery{}, databaseError("begin upload reservation", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setRegistrationTimeouts(ctx, tx); err != nil {
+		return knowledge.UploadRecovery{}, err
+	}
+	if command.TargetDocumentID != nil {
+		var exists bool
+		if err := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM syncbase.document WHERE id=$1)", command.TargetDocumentID).Scan(&exists); err != nil {
+			return knowledge.UploadRecovery{}, databaseError("validate upload target", err)
+		}
+		if !exists {
+			return knowledge.UploadRecovery{}, knowledge.ErrNotFound
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO syncbase.upload_request(
+			request_key,operation,target_document_id,content_sha256,byte_size,status
+		) VALUES ($1,$2,$3,$4,$5,'PENDING')
+		ON CONFLICT (request_key) DO NOTHING`,
+		command.RequestKey, command.Operation, command.TargetDocumentID,
+		command.ContentSHA256, command.ByteSize,
+	); err != nil {
+		return knowledge.UploadRecovery{}, databaseError("reserve upload request", err)
+	}
+	existing, found, err := findUpload(ctx, tx, command.RequestKey, false)
+	if err != nil {
+		return knowledge.UploadRecovery{}, err
+	}
+	if !found {
+		return knowledge.UploadRecovery{}, fmt.Errorf("reserved upload request disappeared: %w", knowledge.ErrTemporarilyUnavailable)
+	}
+	if !sameUploadIdentity(existing, command) {
+		return knowledge.UploadRecovery{}, knowledge.ErrIdempotencyConflict
+	}
+	if existing.expired || existing.status == "EXPIRED" {
+		return knowledge.UploadRecovery{State: knowledge.UploadExpired}, nil
+	}
+	recovery, err := existing.recovery()
+	if err != nil {
+		return knowledge.UploadRecovery{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return knowledge.UploadRecovery{}, databaseError("commit upload reservation", err)
+	}
+	logDatabaseStage(ctx, "pending_reservation_commit", started, nil)
+	return recovery, nil
+}
+
+// ExpireRegistration closes a PENDING reservation after a definitive input
+// rejection. Transient failures deliberately leave PENDING intact for retry.
+func (s *Store) ExpireRegistration(ctx context.Context, command knowledge.ReserveUploadCommand) error {
+	if err := validateReservation(command); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE syncbase.upload_request
+		SET status='EXPIRED',expires_at=clock_timestamp(),updated_at=clock_timestamp()
+		WHERE request_key=$1 AND status='PENDING' AND operation=$2
+		  AND target_document_id IS NOT DISTINCT FROM $3
+		  AND content_sha256=$4 AND byte_size=$5`,
+		command.RequestKey, command.Operation, command.TargetDocumentID,
+		command.ContentSHA256, command.ByteSize,
+	)
+	return databaseError("expire upload reservation", err)
+}
+
 // Register atomically creates an idempotent document version and processing run.
+// It deliberately does not lock queue_control: worker fencing and upload
+// admission are separate concerns, and registration must not wait behind a
+// worker's singleton claim transaction.
 func (s *Store) Register(ctx context.Context, command knowledge.RegisterCommand) (knowledge.Registration, error) {
 	if err := validateRegister(command); err != nil {
 		return knowledge.Registration{}, err
 	}
+	recovery, err := s.ReserveRegistration(ctx, knowledge.ReserveUploadCommand{
+		RequestKey: command.RequestKey, Operation: command.Operation,
+		TargetDocumentID: command.TargetDocumentID, ContentSHA256: command.ContentSHA256,
+		ByteSize: command.ByteSize,
+	})
+	if err != nil {
+		return knowledge.Registration{}, err
+	}
+	if recovery.State == knowledge.UploadAccepted {
+		recovery.Registration.Recovered = true
+		return recovery.Registration, nil
+	}
+	if recovery.State != knowledge.UploadPending {
+		return knowledge.Registration{}, knowledge.ErrIdempotencyConflict
+	}
+	transactionStarted := time.Now()
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return knowledge.Registration{}, fmt.Errorf("begin registration: %w", err)
+		return knowledge.Registration{}, databaseError("begin registration", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, "SELECT next_fencing_token FROM syncbase.queue_control WHERE singleton = true FOR UPDATE"); err != nil {
-		return knowledge.Registration{}, fmt.Errorf("lock queue: %w", err)
-	}
-	if existing, found, err := findUpload(ctx, tx, command.RequestKey); err != nil {
+	if err := setRegistrationTimeouts(ctx, tx); err != nil {
 		return knowledge.Registration{}, err
-	} else if found {
-		if existing.operation != string(command.Operation) || existing.contentSHA256 != command.ContentSHA256 ||
-			existing.byteSize != command.ByteSize || !sameTarget(existing.targetDocumentID, command.TargetDocumentID) {
-			return knowledge.Registration{}, knowledge.ErrIdempotencyConflict
-		}
-		existing.registration.Recovered = true
-		return existing.registration, nil
 	}
+	lockStarted := time.Now()
+	existing, found, err := findUpload(ctx, tx, command.RequestKey, true)
+	logDatabaseStage(ctx, "upload_request_lock", lockStarted, err)
+	if err != nil {
+		return knowledge.Registration{}, err
+	}
+	if !found {
+		return knowledge.Registration{}, fmt.Errorf("load pending upload request: %w", knowledge.ErrTemporarilyUnavailable)
+	}
+	if !sameUploadIdentity(existing, knowledge.ReserveUploadCommand{
+		RequestKey: command.RequestKey, Operation: command.Operation,
+		TargetDocumentID: command.TargetDocumentID, ContentSHA256: command.ContentSHA256,
+		ByteSize: command.ByteSize,
+	}) {
+		return knowledge.Registration{}, knowledge.ErrIdempotencyConflict
+	}
+	if existing.status == "ACCEPTED" {
+		recovered, recoveryErr := existing.recovery()
+		if recoveryErr != nil {
+			return knowledge.Registration{}, recoveryErr
+		}
+		recovered.Registration.Recovered = true
+		return recovered.Registration, nil
+	}
+	if existing.expired || existing.status != "PENDING" {
+		return knowledge.Registration{}, knowledge.ErrIdempotencyConflict
+	}
+	workStarted := time.Now()
 	var live int
 	if err := tx.QueryRow(ctx, "SELECT count(*) FROM syncbase.processing_run WHERE status IN ('QUEUED','RUNNING')").Scan(&live); err != nil {
-		return knowledge.Registration{}, fmt.Errorf("count live runs: %w", err)
+		return knowledge.Registration{}, databaseError("count live runs", err)
 	}
 	if live >= maxLiveRuns {
 		return knowledge.Registration{}, knowledge.ErrQueueFull
 	}
 	var profile string
 	if err := tx.QueryRow(ctx, "SELECT fingerprint FROM syncbase.processing_profile WHERE active = true").Scan(&profile); err != nil {
-		return knowledge.Registration{}, fmt.Errorf("load active profile: %w", err)
+		return knowledge.Registration{}, databaseError("load active profile", err)
 	}
 
 	documentID := uuid.New()
@@ -88,12 +209,12 @@ func (s *Store) Register(ctx context.Context, command knowledge.RegisterCommand)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return knowledge.Registration{}, knowledge.ErrNotFound
 			}
-			return knowledge.Registration{}, fmt.Errorf("lock document: %w", err)
+			return knowledge.Registration{}, databaseError("lock document", err)
 		}
 		_, err = tx.Exec(ctx, "UPDATE syncbase.document SET next_version=next_version+1, updated_at=clock_timestamp() WHERE id=$1", documentID)
 	}
 	if err != nil {
-		return knowledge.Registration{}, fmt.Errorf("write document: %w", err)
+		return knowledge.Registration{}, databaseError("write document", err)
 	}
 	versionID := uuid.New()
 	runID := uuid.New()
@@ -106,29 +227,35 @@ func (s *Store) Register(ctx context.Context, command knowledge.RegisterCommand)
 		versionID, documentID, version, command.ContentSHA256, command.ByteSize,
 		command.OriginalFileName, command.StorageKey, profile,
 	); err != nil {
-		return knowledge.Registration{}, fmt.Errorf("write document version: %w", err)
+		return knowledge.Registration{}, databaseError("write document version", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO syncbase.processing_run(id, version_id, status, stage, correlation_id)
 		VALUES ($1,$2,'QUEUED','METADATA',$3)`, runID, versionID, correlationID); err != nil {
-		return knowledge.Registration{}, fmt.Errorf("write processing run: %w", err)
+		return knowledge.Registration{}, databaseError("write processing run", err)
 	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO syncbase.upload_request(
-			request_key, operation, target_document_id, content_sha256, byte_size,
-			status, document_id, version_id, processing_run_id
-		) VALUES ($1,$2,$3,$4,$5,'ACCEPTED',$6,$7,$8)`,
-		command.RequestKey, command.Operation, command.TargetDocumentID, command.ContentSHA256,
-		command.ByteSize, documentID, versionID, runID,
-	); err != nil {
-		return knowledge.Registration{}, fmt.Errorf("write upload request: %w", err)
+	result, err := tx.Exec(ctx, `
+		UPDATE syncbase.upload_request
+		SET status='ACCEPTED',document_id=$2,version_id=$3,processing_run_id=$4,
+		    updated_at=clock_timestamp()
+		WHERE request_key=$1 AND status='PENDING'`, command.RequestKey, documentID, versionID, runID)
+	if err != nil {
+		return knowledge.Registration{}, databaseError("accept upload request", err)
+	}
+	if result.RowsAffected() != 1 {
+		return knowledge.Registration{}, fmt.Errorf("accept upload request: %w", knowledge.ErrTemporarilyUnavailable)
 	}
 	if err := appendChange(ctx, tx, documentID, versionID, runID, "VERSION_REGISTERED"); err != nil {
 		return knowledge.Registration{}, err
 	}
+	logDatabaseStage(ctx, "transaction_work", workStarted, nil)
+	commitStarted := time.Now()
 	if err := tx.Commit(ctx); err != nil {
-		return knowledge.Registration{}, fmt.Errorf("commit registration: %w", err)
+		logDatabaseStage(ctx, "commit", commitStarted, err)
+		return knowledge.Registration{}, databaseError("commit registration", err)
 	}
+	logDatabaseStage(ctx, "commit", commitStarted, nil)
+	logDatabaseStage(ctx, "registration_total", transactionStarted, nil)
 	return knowledge.Registration{
 		DocumentID: documentID,
 		VersionID:  versionID,
@@ -1169,28 +1296,37 @@ type upload struct {
 	targetDocumentID *uuid.UUID
 	contentSHA256    string
 	byteSize         int64
+	status           string
+	expired          bool
 	registration     knowledge.Registration
 }
 
-func findUpload(ctx context.Context, tx pgx.Tx, requestKey string) (upload, bool, error) {
+func findUpload(ctx context.Context, tx pgx.Tx, requestKey string, lock bool) (upload, bool, error) {
 	var item upload
 	var target pgtype.Text
-	var status knowledge.VersionStatus
-	err := tx.QueryRow(ctx, `
+	var documentID, versionID, runID pgtype.UUID
+	var versionNumber pgtype.Int4
+	var versionStatus pgtype.Text
+	query := `
 		SELECT u.operation, u.target_document_id::text, u.content_sha256, u.byte_size,
-		       u.document_id, u.version_id, v.version_number, u.processing_run_id, v.status
+		       u.status,u.expires_at <= clock_timestamp(),
+		       u.document_id,u.version_id,v.version_number,u.processing_run_id,v.status
 		FROM syncbase.upload_request u
-		JOIN syncbase.document_version v ON v.id=u.version_id
-		WHERE u.request_key=$1 AND u.expires_at > clock_timestamp()`, requestKey).Scan(
+		LEFT JOIN syncbase.document_version v ON v.id=u.version_id
+		WHERE u.request_key=$1`
+	if lock {
+		query += " FOR UPDATE OF u"
+	}
+	err := tx.QueryRow(ctx, query, requestKey).Scan(
 		&item.operation, &target, &item.contentSHA256, &item.byteSize,
-		&item.registration.DocumentID, &item.registration.VersionID, &item.registration.Version,
-		&item.registration.RunID, &status,
+		&item.status, &item.expired,
+		&documentID, &versionID, &versionNumber, &runID, &versionStatus,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return upload{}, false, nil
 	}
 	if err != nil {
-		return upload{}, false, fmt.Errorf("load upload request: %w", err)
+		return upload{}, false, databaseError("load upload request", err)
 	}
 	if target.Valid {
 		value, err := uuid.Parse(target.String)
@@ -1199,24 +1335,100 @@ func findUpload(ctx context.Context, tx pgx.Tx, requestKey string) (upload, bool
 		}
 		item.targetDocumentID = &value
 	}
-	item.registration.Status = status
+	if documentID.Valid {
+		item.registration.DocumentID = uuid.UUID(documentID.Bytes)
+	}
+	if versionID.Valid {
+		item.registration.VersionID = uuid.UUID(versionID.Bytes)
+	}
+	if versionNumber.Valid {
+		item.registration.Version = int(versionNumber.Int32)
+	}
+	if runID.Valid {
+		item.registration.RunID = uuid.UUID(runID.Bytes)
+	}
+	if versionStatus.Valid {
+		item.registration.Status = knowledge.VersionStatus(versionStatus.String)
+	}
 	return item, true, nil
 }
 
-func validateRegister(command knowledge.RegisterCommand) error {
+func (u upload) recovery() (knowledge.UploadRecovery, error) {
+	if u.expired || u.status == "EXPIRED" {
+		return knowledge.UploadRecovery{State: knowledge.UploadExpired}, nil
+	}
+	switch u.status {
+	case "PENDING":
+		return knowledge.UploadRecovery{State: knowledge.UploadPending}, nil
+	case "CONFLICT":
+		return knowledge.UploadRecovery{State: knowledge.UploadConflict}, nil
+	case "ACCEPTED":
+		if u.registration.DocumentID == uuid.Nil || u.registration.VersionID == uuid.Nil ||
+			u.registration.Version < 1 || u.registration.RunID == uuid.Nil || u.registration.Status == "" {
+			return knowledge.UploadRecovery{}, fmt.Errorf("invalid accepted upload state: %w", knowledge.ErrInvalidArgument)
+		}
+		return knowledge.UploadRecovery{State: knowledge.UploadAccepted, Registration: u.registration}, nil
+	default:
+		return knowledge.UploadRecovery{}, fmt.Errorf("invalid upload status %q: %w", u.status, knowledge.ErrInvalidArgument)
+	}
+}
+
+func sameUploadIdentity(item upload, command knowledge.ReserveUploadCommand) bool {
+	return item.operation == string(command.Operation) &&
+		item.contentSHA256 == command.ContentSHA256 &&
+		item.byteSize == command.ByteSize &&
+		sameTarget(item.targetDocumentID, command.TargetDocumentID)
+}
+
+func validateReservation(command knowledge.ReserveUploadCommand) error {
 	if command.RequestKey == "" || len(command.RequestKey) > 200 ||
 		(command.Operation != knowledge.RegisterNewDocument && command.Operation != knowledge.RegisterNewVersion) ||
-		len(command.ContentSHA256) != 64 || command.ByteSize < 1 || command.ByteSize > knowledge.MaxUploadBytes ||
-		command.OriginalFileName == "" || command.StorageKey == "" {
+		!validSHA256(command.ContentSHA256) || command.ByteSize < 1 || command.ByteSize > knowledge.MaxUploadBytes {
 		return knowledge.ErrInvalidArgument
 	}
 	if command.Operation == knowledge.RegisterNewDocument && command.TargetDocumentID != nil {
 		return knowledge.ErrInvalidArgument
 	}
-	if command.Operation == knowledge.RegisterNewVersion && command.TargetDocumentID == nil {
+	if command.Operation == knowledge.RegisterNewVersion && (command.TargetDocumentID == nil || *command.TargetDocumentID == uuid.Nil) {
 		return knowledge.ErrInvalidArgument
 	}
 	return nil
+}
+
+func validateRegister(command knowledge.RegisterCommand) error {
+	if err := validateReservation(knowledge.ReserveUploadCommand{
+		RequestKey: command.RequestKey, Operation: command.Operation,
+		TargetDocumentID: command.TargetDocumentID, ContentSHA256: command.ContentSHA256,
+		ByteSize: command.ByteSize,
+	}); err != nil {
+		return err
+	}
+	if command.OriginalFileName == "" || command.StorageKey == "" {
+		return knowledge.ErrInvalidArgument
+	}
+	return nil
+}
+
+func setRegistrationTimeouts(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '"+registrationLockTimeout+"'"); err != nil {
+		return databaseError("set registration lock timeout", err)
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+registrationStatementTimeout+"'"); err != nil {
+		return databaseError("set registration statement timeout", err)
+	}
+	return nil
+}
+
+func logDatabaseStage(ctx context.Context, stage string, started time.Time, err error) {
+	outcome := "ok"
+	if err != nil {
+		outcome = "error"
+	}
+	slog.InfoContext(ctx, "document registration database stage",
+		"stage", stage,
+		"duration_ms", time.Since(started).Milliseconds(),
+		"outcome", outcome,
+	)
 }
 
 func sameTarget(left, right *uuid.UUID) bool {
@@ -1236,7 +1448,7 @@ func appendChange(
 		INSERT INTO syncbase.change_log(document_id,version_id,run_id,event_type)
 		VALUES ($1,$2,$3,$4)`, documentID, versionID, runID, eventType)
 	if err != nil {
-		return fmt.Errorf("append change log: %w", err)
+		return databaseError("append change log", err)
 	}
 	return nil
 }

@@ -46,6 +46,54 @@ func TestRegisterPersistsValidatedOriginal(t *testing.T) {
 	}
 }
 
+func TestRegisterCreatesRecoverablePendingReservationBeforeParsing(t *testing.T) {
+	t.Parallel()
+
+	repository := &fixtureRepository{}
+	parser := &fixtureParser{
+		pages: []knowledge.PageText{{PageNumber: 1, Text: "정책 본문"}},
+		beforeParse: func() {
+			if repository.reserveCalls != 1 {
+				t.Fatalf("reserve calls before Parse = %d, want 1", repository.reserveCalls)
+			}
+			recovery, err := repository.RecoverRegistration(context.Background(), "pending-before-parse")
+			if err != nil || recovery.State != knowledge.UploadPending {
+				t.Fatalf("recovery during Parse = %+v, error=%v, want pending", recovery, err)
+			}
+		},
+	}
+	service := newFixtureService(t, repository, &fixtureOriginalStore{key: "aa/bb/original"}, parser)
+
+	if _, err := service.Register(context.Background(), RegisterCommand{
+		RequestKey: "pending-before-parse", Operation: knowledge.RegisterNewDocument,
+		DocumentName: "정보보안 정책", OriginalFileName: "policy.pdf",
+		Content: []byte("%PDF-validated-content"),
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+}
+
+func TestRegisterExpiresPendingReservationAfterDefinitiveParseRejection(t *testing.T) {
+	t.Parallel()
+
+	repository := &fixtureRepository{}
+	service := newFixtureService(t, repository, &fixtureOriginalStore{}, &fixtureParser{
+		err: knowledge.ErrInvalidPDF,
+	})
+
+	_, err := service.Register(context.Background(), RegisterCommand{
+		RequestKey: "invalid-after-reservation", Operation: knowledge.RegisterNewDocument,
+		DocumentName: "잘못된 PDF", OriginalFileName: "invalid.pdf",
+		Content: []byte("%PDF-invalid-content"),
+	})
+	if !errors.Is(err, knowledge.ErrInvalidPDF) {
+		t.Fatalf("Register error=%v, want ErrInvalidPDF", err)
+	}
+	if repository.expireCalls != 1 {
+		t.Fatalf("ExpireRegistration calls=%d, want 1", repository.expireCalls)
+	}
+}
+
 func TestFindNameMatchesNormalizesForNonBlockingDuplicateGuidance(t *testing.T) {
 	t.Parallel()
 
@@ -321,6 +369,9 @@ type fixtureRepository struct {
 	matchedNormalizedName string
 	nameMatchLimit        int
 	source                knowledge.SourceDocument
+	reserveCalls          int
+	reservedRequestKey    string
+	expireCalls           int
 }
 
 func (r *fixtureRepository) ListDocuments(context.Context, int, int) ([]knowledge.DocumentSummary, error) {
@@ -345,7 +396,21 @@ func (r *fixtureRepository) GetSource(context.Context, uuid.UUID, int) (knowledg
 }
 
 func (r *fixtureRepository) RecoverRegistration(context.Context, string) (knowledge.UploadRecovery, error) {
+	if r.reserveCalls > 0 {
+		return knowledge.UploadRecovery{State: knowledge.UploadPending}, nil
+	}
 	return knowledge.UploadRecovery{State: knowledge.UploadNotCommitted}, nil
+}
+
+func (r *fixtureRepository) ReserveRegistration(_ context.Context, command knowledge.ReserveUploadCommand) (knowledge.UploadRecovery, error) {
+	r.reserveCalls++
+	r.reservedRequestKey = command.RequestKey
+	return knowledge.UploadRecovery{State: knowledge.UploadPending}, nil
+}
+
+func (r *fixtureRepository) ExpireRegistration(context.Context, knowledge.ReserveUploadCommand) error {
+	r.expireCalls++
+	return nil
 }
 
 func (r *fixtureRepository) StorageKeyReferenced(context.Context, string) (bool, error) {
@@ -397,13 +462,17 @@ func (s *fixtureOriginalStore) Ready(context.Context) error {
 }
 
 type fixtureParser struct {
-	pages    []knowledge.PageText
-	err      error
-	readyErr error
-	calls    int
+	pages       []knowledge.PageText
+	err         error
+	readyErr    error
+	calls       int
+	beforeParse func()
 }
 
 func (p *fixtureParser) Parse(context.Context, []byte) ([]knowledge.PageText, error) {
+	if p.beforeParse != nil {
+		p.beforeParse()
+	}
 	p.calls++
 	return p.pages, p.err
 }

@@ -306,6 +306,16 @@ const (
 	RegisterNewVersion RegistrationOperation = "NEW_VERSION"
 )
 
+// ReserveUploadCommand is the durable idempotency identity written before PDF
+// parsing or Original storage begins.
+type ReserveUploadCommand struct {
+	RequestKey       string
+	Operation        RegistrationOperation
+	TargetDocumentID *uuid.UUID
+	ContentSHA256    string
+	ByteSize         int64
+}
+
 // RegisterCommand is the validated persistence command for one uploaded PDF.
 type RegisterCommand struct {
 	RequestKey       string
