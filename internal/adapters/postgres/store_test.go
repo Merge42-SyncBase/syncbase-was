@@ -662,6 +662,10 @@ func TestRegisterDocumentIsAtomicAndIdempotent(t *testing.T) {
 	if got, want := hits[0].SourceURL, "https://docs.example.test/sources/"+first.DocumentID.String()+"/versions/1?page=1"; got != want {
 		t.Fatalf("v1 source URL = %q, want %q", got, want)
 	}
+	if hits[0].StorageKey != claimedV1.StorageKey || hits[0].ContentSHA256 != claimedV1.ContentSHA256 {
+		t.Fatalf("v1 private source identity = key %q digest %q, want key %q digest %q",
+			hits[0].StorageKey, hits[0].ContentSHA256, claimedV1.StorageKey, claimedV1.ContentSHA256)
+	}
 
 	v2Command := knowledge.RegisterCommand{
 		RequestKey:       "request-register-v2",

@@ -143,10 +143,16 @@ func (s *Service) GroundedDocuments(
 		if s.sources == nil {
 			return insufficient(GroundingSourceUnavailable), nil
 		}
+		verified := make(map[struct{ key, digest string }]struct{}, len(hits))
 		for _, hit := range hits {
+			identity := struct{ key, digest string }{hit.StorageKey, hit.ContentSHA256}
+			if _, ok := verified[identity]; ok {
+				continue
+			}
 			if err := s.sources.Verify(ctx, hit.StorageKey, hit.ContentSHA256); err != nil {
 				return insufficient(GroundingSourceUnavailable), nil
 			}
+			verified[identity] = struct{}{}
 		}
 		return GroundedResult{Status: GroundingSupported, Hits: hits}, nil
 	}

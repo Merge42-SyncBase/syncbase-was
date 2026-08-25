@@ -302,12 +302,12 @@ func (s *Store) GetSource(
 	}
 	var source knowledge.SourceDocument
 	err := s.pool.QueryRow(ctx, `
-		SELECT d.id,d.display_name,v.id,v.version_number,v.storage_key,COALESCE(v.page_count,0)
+		SELECT d.id,d.display_name,v.id,v.version_number,v.storage_key,v.content_sha256,COALESCE(v.page_count,0)
 		FROM syncbase.document d
 		JOIN syncbase.document_version v ON v.document_id=d.id
 		WHERE d.id=$1 AND v.version_number=$2`, documentID, versionNumber).Scan(
 		&source.DocumentID, &source.Name, &source.VersionID, &source.Version,
-		&source.StorageKey, &source.PageCount,
+		&source.StorageKey, &source.ContentSHA256, &source.PageCount,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return knowledge.SourceDocument{}, knowledge.ErrNotFound
@@ -1014,6 +1014,7 @@ func (s *Store) Search(
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT d.id, d.display_name, v.id, v.version_number, c.page_number, c.snippet,
+		       v.storage_key, v.content_sha256,
 		       (c.embedding <=> $1) AS cosine_distance
 		FROM syncbase.search_chunk c
 		JOIN syncbase.document_version v
@@ -1036,7 +1037,7 @@ func (s *Store) Search(
 		var cosineDistance float64
 		if err := rows.Scan(
 			&hit.DocumentID, &hit.DocumentName, &hit.VersionID, &hit.DocumentVersion,
-			&hit.PageNumber, &hit.Snippet, &cosineDistance,
+			&hit.PageNumber, &hit.Snippet, &hit.StorageKey, &hit.ContentSHA256, &cosineDistance,
 		); err != nil {
 			return nil, databaseError("scan search hit", err)
 		}

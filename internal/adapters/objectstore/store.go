@@ -151,6 +151,38 @@ func (s *Store) Read(ctx context.Context, key string) ([]byte, error) {
 	return content, nil
 }
 
+// Verify proves that one confined object is readable and still matches the
+// immutable SHA-256 digest recorded at registration time.
+func (s *Store) Verify(ctx context.Context, key, expectedSHA256 string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	expected, err := hex.DecodeString(expectedSHA256)
+	if err != nil || len(expected) != sha256.Size || strings.ToLower(expectedSHA256) != expectedSHA256 {
+		return errors.New("invalid expected object SHA-256")
+	}
+	path, err := s.Path(key)
+	if err != nil {
+		return err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open object for verification: %w", err)
+	}
+	defer file.Close()
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil {
+		return fmt.Errorf("read object for verification: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !strings.EqualFold(hex.EncodeToString(digest.Sum(nil)), expectedSHA256) {
+		return errors.New("object SHA-256 mismatch")
+	}
+	return nil
+}
+
 // Remove deletes one exact artifact. Callers must first prove that no durable
 // database record references the content-addressed key.
 func (s *Store) Remove(ctx context.Context, key string) error {

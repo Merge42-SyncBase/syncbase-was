@@ -258,7 +258,10 @@ type SourceDocument struct {
 	VersionID  uuid.UUID
 	Version    int
 	StorageKey string
-	PageCount  int
+	// ContentSHA256 is the immutable digest used to verify the original before
+	// source metadata or bytes are served.
+	ContentSHA256 string
+	PageCount     int
 }
 
 // Registration identifies the version and processing run created by an upload.
@@ -354,6 +357,10 @@ type SearchHit struct {
 	PageNumber      int       `json:"page_number"`
 	Snippet         string    `json:"snippet"`
 	SourceURL       string    `json:"source_url"`
+	// StorageKey and ContentSHA256 are private retrieval-safety inputs. They
+	// intentionally never cross the JSON/public runtime boundary.
+	StorageKey    string `json:"-"`
+	ContentSHA256 string `json:"-"`
 }
 
 // ScoreFromCosineDistance maps pgvector cosine distance to the stable public score.

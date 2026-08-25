@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/Merge42-SyncBase/syncbase-was/internal/adapters/objectstore"
@@ -114,7 +115,10 @@ func TestGroundedDocumentsClassifiesEverySafetyStateWithoutLeakingEvidence(t *te
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			service, err := search.New(test.repository, &recordingEmbedder{}, profile, "https://docs.example.test", false)
+			service, err := search.New(
+				test.repository, &recordingEmbedder{}, profile,
+				"https://docs.example.test", false, acceptingSourceVerifier{},
+			)
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -173,6 +177,153 @@ func TestGroundedDocumentsSupportsEvidenceWhoseOriginalMatchesItsDigest(t *testi
 	}
 	if got.Status != search.GroundingSupported || len(got.Hits) != 1 {
 		t.Fatalf("result = %#v, want one supported hit", got)
+	}
+}
+
+func TestGroundedDocumentsRejectsMissingUnreadableOrCorruptCitedOriginal(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, string)
+	}{
+		{
+			name: "missing",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("Remove: %v", err)
+				}
+			},
+		},
+		{
+			name: "unreadable as a regular source file",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("Remove: %v", err)
+				}
+				if err := os.Mkdir(path, 0o750); err != nil {
+					t.Fatalf("Mkdir: %v", err)
+				}
+			},
+		},
+		{
+			name: "SHA-256 mismatch",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte("%PDF-corrupt"), 0o640); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			originals, err := objectstore.New(t.TempDir())
+			if err != nil {
+				t.Fatalf("objectstore.New: %v", err)
+			}
+			validContent := []byte("%PDF-valid-cited-original")
+			validKey, err := originals.Put(ctx, validContent)
+			if err != nil {
+				t.Fatalf("Put valid: %v", err)
+			}
+			invalidContent := []byte("%PDF-second-cited-original")
+			invalidDigest := sha256.Sum256(invalidContent)
+			invalidKey, err := originals.Put(ctx, invalidContent)
+			if err != nil {
+				t.Fatalf("Put invalid target: %v", err)
+			}
+			invalidPath, err := originals.Path(invalidKey)
+			if err != nil {
+				t.Fatalf("Path: %v", err)
+			}
+			test.mutate(t, invalidPath)
+			validDigest := sha256.Sum256(validContent)
+			repository := &recordingRepository{
+				inactiveMatch: true,
+				hits: []knowledge.SearchHit{
+					{Rank: 1, Snippet: "present", StorageKey: validKey, ContentSHA256: hex.EncodeToString(validDigest[:])},
+					{Rank: 2, Snippet: "unsafe", StorageKey: invalidKey, ContentSHA256: hex.EncodeToString(invalidDigest[:])},
+				},
+			}
+			service, err := search.New(
+				repository, &recordingEmbedder{},
+				knowledge.Profile{VectorDimension: knowledge.VectorDimension},
+				"https://docs.example.test", false, originals,
+			)
+			if err != nil {
+				t.Fatalf("search.New: %v", err)
+			}
+
+			got, err := service.GroundedDocuments(ctx, "정책", 5)
+			if err != nil {
+				t.Fatalf("GroundedDocuments: %v", err)
+			}
+			if got.Status != search.GroundingInsufficientEvidence ||
+				got.Reason != search.GroundingSourceUnavailable || len(got.Hits) != 0 || got.Hits == nil {
+				t.Fatalf("result = %#v, want fail-closed SOURCE_UNAVAILABLE with []", got)
+			}
+			if repository.inactiveProbeCalls != 0 {
+				t.Fatalf("inactive probe calls = %d, want 0 when active citations are unsafe", repository.inactiveProbeCalls)
+			}
+		})
+	}
+}
+
+func TestGroundedDocumentsWithoutSourceVerifierFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	service, err := search.New(
+		&recordingRepository{hits: []knowledge.SearchHit{{
+			Rank: 1, Snippet: "unverified", StorageKey: "aa/bb/object",
+			ContentSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		}}},
+		&recordingEmbedder{}, knowledge.Profile{VectorDimension: knowledge.VectorDimension},
+		"https://docs.example.test", false,
+	)
+	if err != nil {
+		t.Fatalf("search.New: %v", err)
+	}
+
+	got, err := service.GroundedDocuments(context.Background(), "정책", 5)
+	if err != nil {
+		t.Fatalf("GroundedDocuments: %v", err)
+	}
+	if got.Status != search.GroundingInsufficientEvidence ||
+		got.Reason != search.GroundingSourceUnavailable || len(got.Hits) != 0 || got.Hits == nil {
+		t.Fatalf("result = %#v, want fail-closed SOURCE_UNAVAILABLE with []", got)
+	}
+}
+
+func TestGroundedDocumentsVerifiesEachCitedOriginalOnce(t *testing.T) {
+	t.Parallel()
+
+	verifier := &countingSourceVerifier{}
+	hits := []knowledge.SearchHit{
+		{Rank: 1, StorageKey: "aa/bb/object", ContentSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		{Rank: 2, StorageKey: "aa/bb/object", ContentSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+	}
+	service, err := search.New(
+		&recordingRepository{hits: hits}, &recordingEmbedder{},
+		knowledge.Profile{VectorDimension: knowledge.VectorDimension},
+		"https://docs.example.test", false, verifier,
+	)
+	if err != nil {
+		t.Fatalf("search.New: %v", err)
+	}
+
+	got, err := service.GroundedDocuments(context.Background(), "정책", 5)
+	if err != nil {
+		t.Fatalf("GroundedDocuments: %v", err)
+	}
+	if got.Status != search.GroundingSupported || len(got.Hits) != 2 {
+		t.Fatalf("result = %#v, want two supported hits", got)
+	}
+	if verifier.calls != 1 {
+		t.Fatalf("source verification calls = %d, want 1 for duplicate citations", verifier.calls)
 	}
 }
 
@@ -280,6 +431,19 @@ func TestNewRejectsUnsafePublicBaseURLs(t *testing.T) {
 type recordingEmbedder struct {
 	query string
 	calls int
+}
+
+type acceptingSourceVerifier struct{}
+
+func (acceptingSourceVerifier) Verify(context.Context, string, string) error { return nil }
+
+type countingSourceVerifier struct {
+	calls int
+}
+
+func (v *countingSourceVerifier) Verify(context.Context, string, string) error {
+	v.calls++
+	return nil
 }
 
 func (e *recordingEmbedder) EmbedQuery(_ context.Context, query string, _ knowledge.Profile) ([]float32, error) {

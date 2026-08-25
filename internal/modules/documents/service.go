@@ -37,6 +37,7 @@ type repository interface {
 type originalStore interface {
 	Put(context.Context, []byte) (string, error)
 	Path(string) (string, error)
+	Verify(context.Context, string, string) error
 	Remove(context.Context, string) error
 	Ready(context.Context) error
 }
@@ -199,6 +200,9 @@ func (s *Service) Source(ctx context.Context, documentID uuid.UUID, version int)
 	document, err := s.repository.GetSource(ctx, documentID, version)
 	if err != nil {
 		return Source{}, err
+	}
+	if err := s.originals.Verify(ctx, document.StorageKey, document.ContentSHA256); err != nil {
+		return Source{}, fmt.Errorf("verify source PDF: %v: %w", err, knowledge.ErrNotFound)
 	}
 	path, err := s.originals.Path(document.StorageKey)
 	if err != nil {

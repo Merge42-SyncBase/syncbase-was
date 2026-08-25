@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/Merge42-SyncBase/syncbase-was/internal/adapters/embedding"
+	"github.com/Merge42-SyncBase/syncbase-was/internal/adapters/objectstore"
 	"github.com/Merge42-SyncBase/syncbase-was/internal/adapters/postgres"
 	"github.com/Merge42-SyncBase/syncbase-was/internal/modules/knowledge"
 	"github.com/Merge42-SyncBase/syncbase-was/internal/modules/search"
@@ -37,6 +38,10 @@ type Config struct {
 	RuntimeLibraryPath string
 	PublicBaseURL      string
 	MinimumScore       float64
+	// OriginalRoot enables citation-integrity verification for grounded search.
+	// It is optional for source compatibility; when omitted, grounded hits fail
+	// closed as SOURCE_UNAVAILABLE while the legacy Documents method still works.
+	OriginalRoot string
 }
 
 // Hit is one ranked, page-grounded result from the active document version.
@@ -110,7 +115,18 @@ func Open(ctx context.Context, runtimeConfig Config) (*Runtime, error) {
 		pool.Close()
 		return nil, err
 	}
-	searchService, err := search.New(store, embedder, profile, runtimeConfig.PublicBaseURL, true)
+	var searchService *search.Service
+	if strings.TrimSpace(runtimeConfig.OriginalRoot) == "" {
+		searchService, err = search.New(store, embedder, profile, runtimeConfig.PublicBaseURL, true)
+	} else {
+		originals, storeErr := objectstore.New(runtimeConfig.OriginalRoot)
+		if storeErr != nil {
+			_ = embedder.Close()
+			pool.Close()
+			return nil, fmt.Errorf("configure MCP original store: %w", storeErr)
+		}
+		searchService, err = search.New(store, embedder, profile, runtimeConfig.PublicBaseURL, true, originals)
+	}
 	if err != nil {
 		_ = embedder.Close()
 		pool.Close()
