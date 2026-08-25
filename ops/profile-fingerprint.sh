@@ -16,7 +16,7 @@ model_sha="ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665"
 tokenizer_sha="0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39"
 onnx_runtime_id="onnxruntime-1.26.0"
 canonical="$(printf '%s' \
-  "{\"chunker_id\":\"page-aware-recursive-v1\",\"distance\":\"cosine\",\"embedding_model_id\":\"intfloat/multilingual-e5-small\",\"embedding_model_sha256\":\"$model_sha\",\"minimum_score\":$minimum_score,\"onnx_runtime_id\":\"$onnx_runtime_id\",\"parser_id\":\"pdfium-wasm-1.19.6\",\"tokenizer_sha256\":\"$tokenizer_sha\",\"vector_dimension\":384}")"
+  "{\"chunk_overlap_tokens\":64,\"chunk_size_tokens\":384,\"chunker_id\":\"page-aware-recursive-v1\",\"distance\":\"cosine\",\"embedding_model_id\":\"intfloat/multilingual-e5-small\",\"embedding_model_sha256\":\"$model_sha\",\"minimum_score\":$minimum_score,\"onnx_runtime_id\":\"$onnx_runtime_id\",\"parser_id\":\"pdfium-wasm-1.19.6\",\"provider\":\"local-onnx\",\"tokenizer_sha256\":\"$tokenizer_sha\",\"vector_dimension\":384}")"
 
 if command -v sha256sum >/dev/null 2>&1; then
   fingerprint="$(printf '%s' "$canonical" | sha256sum | awk '{print $1}')"
