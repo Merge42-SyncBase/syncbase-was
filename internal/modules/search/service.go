@@ -34,6 +34,10 @@ type sourceVerifier interface {
 	Verify(context.Context, string, string) error
 }
 
+type sourceReadiness interface {
+	Readable(context.Context) error
+}
+
 // Service validates, embeds, and executes grounded document searches.
 type Service struct {
 	repository    repository
@@ -104,10 +108,19 @@ func New(
 	}, nil
 }
 
-// Ready reports whether the query embedder can accept work.
+// Ready reports whether the query embedder and configured original-source store can accept work.
 func (s *Service) Ready(ctx context.Context) error {
 	if err := s.embedder.Ready(ctx); err != nil {
 		return fmt.Errorf("search embedder readiness: %w", err)
+	}
+	if s.sources != nil {
+		readiness, ok := s.sources.(sourceReadiness)
+		if !ok {
+			return fmt.Errorf("search source readiness: %w", knowledge.ErrTemporarilyUnavailable)
+		}
+		if err := readiness.Readable(ctx); err != nil {
+			return fmt.Errorf("search source readiness: %w", err)
+		}
 	}
 	return nil
 }
