@@ -132,9 +132,22 @@ type apiRetryResponse struct {
 }
 
 type apiSearchResponse struct {
-	Query   string                `json:"query"`
-	Results []knowledge.SearchHit `json:"results"`
+	Query           string                `json:"query"`
+	GroundingStatus groundingStatus       `json:"grounding_status"`
+	GroundingReason *groundingReason      `json:"grounding_reason"`
+	Results         []knowledge.SearchHit `json:"results"`
 }
+
+type groundingStatus string
+type groundingReason string
+
+const (
+	groundingSupported                  groundingStatus = "SUPPORTED"
+	groundingInsufficientEvidence       groundingStatus = "INSUFFICIENT_EVIDENCE"
+	groundingNoHitsAbovePolicy          groundingReason = "NO_HITS_ABOVE_POLICY"
+	groundingOnlyInactiveVersionMatched groundingReason = "ONLY_INACTIVE_VERSION_MATCHED"
+	groundingSourceUnavailable          groundingReason = "SOURCE_UNAVAILABLE"
+)
 
 type apiSourceResponse struct {
 	DocumentID   uuid.UUID `json:"documentId"`
@@ -361,15 +374,25 @@ func (s *Server) apiSearchDocuments(response http.ResponseWriter, request *http.
 		return
 	}
 	if s.search == nil {
-		writeAPIError(response, http.StatusServiceUnavailable, "MCP_UNAVAILABLE", "검색 연결이 설정되지 않았습니다.", true)
+		writeJSON(response, http.StatusOK, insufficientSearchResponse(query, groundingSourceUnavailable))
 		return
 	}
-	hits, err := s.search.SearchDocuments(request.Context(), query, limit)
+	grounded, err := s.search.SearchGroundedDocuments(request.Context(), query, limit)
 	if err != nil {
 		s.writeAPIError(response, err)
 		return
 	}
-	writeJSON(response, http.StatusOK, apiSearchResponse{Query: query, Results: hits})
+	writeJSON(response, http.StatusOK, apiSearchResponse{
+		Query: query, GroundingStatus: grounded.Status,
+		GroundingReason: grounded.Reason, Results: grounded.Hits,
+	})
+}
+
+func insufficientSearchResponse(query string, reason groundingReason) apiSearchResponse {
+	return apiSearchResponse{
+		Query: query, GroundingStatus: groundingInsufficientEvidence,
+		GroundingReason: &reason, Results: make([]knowledge.SearchHit, 0),
+	}
 }
 
 func (s *Server) apiSource(response http.ResponseWriter, request *http.Request) {

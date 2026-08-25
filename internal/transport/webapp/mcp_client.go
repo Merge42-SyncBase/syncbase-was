@@ -60,9 +60,43 @@ func (c *mcpClient) SearchDocuments(
 	query string,
 	limit int,
 ) ([]knowledge.SearchHit, error) {
+	result, err := c.searchDocuments(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	if result.Status == groundingInsufficientEvidence && result.Reason != nil &&
+		*result.Reason == groundingSourceUnavailable {
+		return nil, knowledge.ErrTemporarilyUnavailable
+	}
+	return result.Hits, nil
+}
+
+type mcpGroundedResult struct {
+	Status groundingStatus
+	Reason *groundingReason
+	Hits   []knowledge.SearchHit
+}
+
+func (c *mcpClient) SearchGroundedDocuments(
+	ctx context.Context,
+	query string,
+	limit int,
+) (mcpGroundedResult, error) {
+	result, err := c.searchDocuments(ctx, query, limit)
+	if err != nil && (errors.Is(err, knowledge.ErrTemporarilyUnavailable) || errors.Is(err, context.DeadlineExceeded)) {
+		return insufficientMCPResult(groundingSourceUnavailable), nil
+	}
+	return result, err
+}
+
+func (c *mcpClient) searchDocuments(
+	ctx context.Context,
+	query string,
+	limit int,
+) (mcpGroundedResult, error) {
 	query = strings.TrimSpace(query)
 	if query == "" || len([]rune(query)) > 2000 || limit < 1 || limit > 20 {
-		return nil, knowledge.ErrInvalidArgument
+		return mcpGroundedResult{}, knowledge.ErrInvalidArgument
 	}
 	payload := map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -73,11 +107,11 @@ func (c *mcpClient) SearchDocuments(
 	}
 	content, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("encode MCP search request: %w", err)
+		return mcpGroundedResult{}, fmt.Errorf("encode MCP search request: %w", err)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(content))
 	if err != nil {
-		return nil, fmt.Errorf("build MCP search request: %w", err)
+		return mcpGroundedResult{}, fmt.Errorf("build MCP search request: %w", err)
 	}
 	request.Header.Set("Authorization", "Bearer "+c.token)
 	request.Header.Set("Content-Type", "application/json")
@@ -85,20 +119,20 @@ func (c *mcpClient) SearchDocuments(
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
+			return mcpGroundedResult{}, err
 		}
-		return nil, fmt.Errorf("call MCP search: %w", knowledge.ErrTemporarilyUnavailable)
+		return mcpGroundedResult{}, fmt.Errorf("call MCP search: %w", knowledge.ErrTemporarilyUnavailable)
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 2*1024*1024))
 	if err != nil {
-		return nil, fmt.Errorf("read MCP search response: %w", knowledge.ErrTemporarilyUnavailable)
+		return mcpGroundedResult{}, fmt.Errorf("read MCP search response: %w", knowledge.ErrTemporarilyUnavailable)
 	}
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
-		return nil, knowledge.ErrUnauthenticated
+		return mcpGroundedResult{}, knowledge.ErrUnauthenticated
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, knowledge.ErrTemporarilyUnavailable
+		return mcpGroundedResult{}, knowledge.ErrTemporarilyUnavailable
 	}
 	var result struct {
 		Result struct {
@@ -108,7 +142,9 @@ func (c *mcpClient) SearchDocuments(
 				Text string `json:"text"`
 			} `json:"content"`
 			StructuredContent struct {
-				Results []knowledge.SearchHit `json:"results"`
+				GroundingStatus groundingStatus       `json:"grounding_status"`
+				GroundingReason *groundingReason      `json:"grounding_reason"`
+				Results         []knowledge.SearchHit `json:"results"`
 			} `json:"structuredContent"`
 		} `json:"result"`
 		Error *struct {
@@ -119,13 +155,13 @@ func (c *mcpClient) SearchDocuments(
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("decode MCP search response: %w", knowledge.ErrTemporarilyUnavailable)
+		return mcpGroundedResult{}, fmt.Errorf("decode MCP search response: %w", knowledge.ErrTemporarilyUnavailable)
 	}
 	if result.Error != nil {
 		if err := mcpSearchError(result.Error.Data.Code); err != nil {
-			return nil, err
+			return mcpGroundedResult{}, err
 		}
-		return nil, errors.New("MCP search failed")
+		return mcpGroundedResult{}, errors.New("MCP search failed")
 	}
 	if result.Result.IsError {
 		for _, content := range result.Result.Content {
@@ -133,12 +169,60 @@ func (c *mcpClient) SearchDocuments(
 				continue
 			}
 			if err := mcpSearchError(content.Text); err != nil {
-				return nil, err
+				return mcpGroundedResult{}, err
 			}
 		}
-		return nil, errors.New("MCP search failed")
+		return mcpGroundedResult{}, errors.New("MCP search failed")
 	}
-	return result.Result.StructuredContent.Results, nil
+	structured := result.Result.StructuredContent
+	return validateMCPGrounding(structured.GroundingStatus, structured.GroundingReason, structured.Results)
+}
+
+func validateMCPGrounding(
+	status groundingStatus,
+	reason *groundingReason,
+	hits []knowledge.SearchHit,
+) (mcpGroundedResult, error) {
+	// Rolling-upgrade compatibility: infer the additive fields from an older MCP
+	// response while preserving all existing hit fields.
+	if status == "" {
+		if len(hits) > 0 {
+			status = groundingSupported
+		} else {
+			return insufficientMCPResult(groundingNoHitsAbovePolicy), nil
+		}
+	}
+	switch status {
+	case groundingSupported:
+		if len(hits) == 0 || reason != nil {
+			return mcpGroundedResult{}, knowledge.ErrTemporarilyUnavailable
+		}
+		return mcpGroundedResult{Status: status, Hits: hits}, nil
+	case groundingInsufficientEvidence:
+		if len(hits) != 0 || reason == nil || !validGroundingReason(*reason) {
+			return mcpGroundedResult{}, knowledge.ErrTemporarilyUnavailable
+		}
+		return insufficientMCPResult(*reason), nil
+	default:
+		return mcpGroundedResult{}, knowledge.ErrTemporarilyUnavailable
+	}
+}
+
+func insufficientMCPResult(reason groundingReason) mcpGroundedResult {
+	return mcpGroundedResult{
+		Status: groundingInsufficientEvidence,
+		Reason: &reason,
+		Hits:   make([]knowledge.SearchHit, 0),
+	}
+}
+
+func validGroundingReason(reason groundingReason) bool {
+	switch reason {
+	case groundingNoHitsAbovePolicy, groundingOnlyInactiveVersionMatched, groundingSourceUnavailable:
+		return true
+	default:
+		return false
+	}
 }
 
 func mcpSearchError(code string) error {

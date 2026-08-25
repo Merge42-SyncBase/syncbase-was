@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"os"
 	"testing"
 
+	"github.com/Merge42-SyncBase/syncbase-was/internal/adapters/objectstore"
 	"github.com/Merge42-SyncBase/syncbase-was/internal/modules/knowledge"
 	"github.com/google/uuid"
 )
@@ -85,6 +87,119 @@ func TestFindNameMatchesRejectsInvalidNameOrLimit(t *testing.T) {
 		if _, err := service.FindNameMatches(context.Background(), test.name, test.limit); !errors.Is(err, knowledge.ErrInvalidArgument) {
 			t.Errorf("FindNameMatches(%q, %d) error=%v, want ErrInvalidArgument", test.name, test.limit, err)
 		}
+	}
+}
+
+func TestSourceReturnsMetadataOnlyAfterTheOriginalDigestIsVerified(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	content := []byte("%PDF-verified-source")
+	digest := sha256.Sum256(content)
+	originals, err := objectstore.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("objectstore.New: %v", err)
+	}
+	storageKey, err := originals.Put(ctx, content)
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	documentID := uuid.New()
+	repository := &fixtureRepository{source: knowledge.SourceDocument{
+		DocumentID: documentID, VersionID: uuid.New(), Version: 1,
+		StorageKey: storageKey, ContentSHA256: hex.EncodeToString(digest[:]),
+	}}
+	service, err := New(repository, originals, &fixtureParser{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	got, err := service.Source(ctx, documentID, 1)
+	if err != nil {
+		t.Fatalf("Source: %v", err)
+	}
+	wantPath, err := originals.Path(storageKey)
+	if err != nil {
+		t.Fatalf("Path: %v", err)
+	}
+	if got.Path != wantPath || got.Document.DocumentID != documentID {
+		t.Fatalf("source = %+v, want path %q document %s", got, wantPath, documentID)
+	}
+}
+
+func TestSourceRejectsMissingUnreadableOrCorruptOriginalBeforeReturningMetadata(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, string)
+	}{
+		{
+			name: "missing",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("Remove: %v", err)
+				}
+			},
+		},
+		{
+			name: "unreadable as a regular source file",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("Remove: %v", err)
+				}
+				if err := os.Mkdir(path, 0o750); err != nil {
+					t.Fatalf("Mkdir: %v", err)
+				}
+			},
+		},
+		{
+			name: "SHA-256 mismatch",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte("%PDF-corrupt"), 0o640); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			content := []byte("%PDF-source-must-remain-immutable")
+			digest := sha256.Sum256(content)
+			originals, err := objectstore.New(t.TempDir())
+			if err != nil {
+				t.Fatalf("objectstore.New: %v", err)
+			}
+			storageKey, err := originals.Put(ctx, content)
+			if err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+			path, err := originals.Path(storageKey)
+			if err != nil {
+				t.Fatalf("Path: %v", err)
+			}
+			test.mutate(t, path)
+			documentID := uuid.New()
+			service, err := New(&fixtureRepository{source: knowledge.SourceDocument{
+				DocumentID: documentID, VersionID: uuid.New(), Version: 1,
+				StorageKey: storageKey, ContentSHA256: hex.EncodeToString(digest[:]),
+			}}, originals, &fixtureParser{})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			got, err := service.Source(ctx, documentID, 1)
+			if !errors.Is(err, knowledge.ErrNotFound) {
+				t.Fatalf("Source error = %v, want ErrNotFound", err)
+			}
+			if got != (Source{}) {
+				t.Fatalf("Source = %+v, want no metadata", got)
+			}
+		})
 	}
 }
 
@@ -205,6 +320,7 @@ type fixtureRepository struct {
 	nameMatchTotal        int
 	matchedNormalizedName string
 	nameMatchLimit        int
+	source                knowledge.SourceDocument
 }
 
 func (r *fixtureRepository) ListDocuments(context.Context, int, int) ([]knowledge.DocumentSummary, error) {
@@ -222,7 +338,10 @@ func (r *fixtureRepository) GetDocument(context.Context, uuid.UUID) (knowledge.D
 }
 
 func (r *fixtureRepository) GetSource(context.Context, uuid.UUID, int) (knowledge.SourceDocument, error) {
-	return knowledge.SourceDocument{}, knowledge.ErrNotFound
+	if r.source.DocumentID == uuid.Nil {
+		return knowledge.SourceDocument{}, knowledge.ErrNotFound
+	}
+	return r.source, nil
 }
 
 func (r *fixtureRepository) RecoverRegistration(context.Context, string) (knowledge.UploadRecovery, error) {
@@ -253,6 +372,7 @@ type fixtureOriginalStore struct {
 	removeErr  error
 	readyErr   error
 	removedKey string
+	verifyErr  error
 }
 
 func (s *fixtureOriginalStore) Put(context.Context, []byte) (string, error) {
@@ -261,6 +381,10 @@ func (s *fixtureOriginalStore) Put(context.Context, []byte) (string, error) {
 
 func (s *fixtureOriginalStore) Path(key string) (string, error) {
 	return "/originals/" + key, nil
+}
+
+func (s *fixtureOriginalStore) Verify(context.Context, string, string) error {
+	return s.verifyErr
 }
 
 func (s *fixtureOriginalStore) Remove(_ context.Context, key string) error {

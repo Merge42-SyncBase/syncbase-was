@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -248,14 +250,56 @@ func TestAPISearchDoesNotExposeMCPTokenWhenUnavailable(t *testing.T) {
 
 	response := getAPI(t, client, server.URL+"/api/v1/search?q=연차")
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusServiceUnavailable {
+	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)
 		t.Fatalf("search status=%d body=%s", response.StatusCode, body)
 	}
-	var unavailable apiError
+	var unavailable apiSearchResponse
 	decodeResponse(t, response, &unavailable)
-	if unavailable.Error.Code != "MCP_UNAVAILABLE" || !unavailable.Error.Retryable {
-		t.Fatalf("search error=%#v", unavailable)
+	if unavailable.GroundingStatus != groundingInsufficientEvidence ||
+		unavailable.GroundingReason == nil || *unavailable.GroundingReason != groundingSourceUnavailable ||
+		unavailable.Results == nil || len(unavailable.Results) != 0 || strings.Contains(fmt.Sprintf("%#v", unavailable), "token") {
+		t.Fatalf("search grounding=%#v", unavailable)
+	}
+}
+
+func TestAPISearchPreservesMCPGroundingVocabularyAndEmptyEvidence(t *testing.T) {
+	tests := []groundingReason{
+		groundingNoHitsAbovePolicy,
+		groundingOnlyInactiveVersionMatched,
+		groundingSourceUnavailable,
+	}
+	for _, reason := range tests {
+		t.Run(string(reason), func(t *testing.T) {
+			mcp := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.Header.Get("Authorization") != "Bearer sb_mcp_v1_test" {
+					http.Error(response, "unauthenticated", http.StatusUnauthorized)
+					return
+				}
+				response.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(response, `{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"grounding_status":"INSUFFICIENT_EVIDENCE","grounding_reason":%q,"results":[]}}}`, reason)
+			}))
+			t.Cleanup(mcp.Close)
+			server := httptest.NewServer(newTestHandlerWithMCP(
+				t, &apiFixtureDocumentStore{}, mcp.URL+"/mcp", "sb_mcp_v1_test",
+			))
+			t.Cleanup(server.Close)
+			client := newCookieClient(t)
+			loginAPI(t, client, server.URL)
+
+			response := getAPI(t, client, server.URL+"/api/v1/search?q=검증")
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(response.Body)
+				t.Fatalf("search status=%d body=%s", response.StatusCode, body)
+			}
+			var result apiSearchResponse
+			decodeResponse(t, response, &result)
+			if result.GroundingStatus != groundingInsufficientEvidence || result.GroundingReason == nil ||
+				*result.GroundingReason != reason || result.Results == nil || len(result.Results) != 0 {
+				t.Fatalf("search grounding=%#v", result)
+			}
+		})
 	}
 }
 

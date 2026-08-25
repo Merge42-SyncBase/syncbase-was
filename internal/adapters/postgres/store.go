@@ -302,12 +302,12 @@ func (s *Store) GetSource(
 	}
 	var source knowledge.SourceDocument
 	err := s.pool.QueryRow(ctx, `
-		SELECT d.id,d.display_name,v.id,v.version_number,v.storage_key,COALESCE(v.page_count,0)
+		SELECT d.id,d.display_name,v.id,v.version_number,v.storage_key,v.content_sha256,COALESCE(v.page_count,0)
 		FROM syncbase.document d
 		JOIN syncbase.document_version v ON v.document_id=d.id
 		WHERE d.id=$1 AND v.version_number=$2`, documentID, versionNumber).Scan(
 		&source.DocumentID, &source.Name, &source.VersionID, &source.Version,
-		&source.StorageKey, &source.PageCount,
+		&source.StorageKey, &source.ContentSHA256, &source.PageCount,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return knowledge.SourceDocument{}, knowledge.ErrNotFound
@@ -1014,6 +1014,7 @@ func (s *Store) Search(
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT d.id, d.display_name, v.id, v.version_number, c.page_number, c.snippet,
+		       v.storage_key, v.content_sha256,
 		       (c.embedding <=> $1) AS cosine_distance
 		FROM syncbase.search_chunk c
 		JOIN syncbase.document_version v
@@ -1036,7 +1037,7 @@ func (s *Store) Search(
 		var cosineDistance float64
 		if err := rows.Scan(
 			&hit.DocumentID, &hit.DocumentName, &hit.VersionID, &hit.DocumentVersion,
-			&hit.PageNumber, &hit.Snippet, &cosineDistance,
+			&hit.PageNumber, &hit.Snippet, &hit.StorageKey, &hit.ContentSHA256, &cosineDistance,
 		); err != nil {
 			return nil, databaseError("scan search hit", err)
 		}
@@ -1052,6 +1053,37 @@ func (s *Store) Search(
 		return nil, databaseError("iterate search hits", err)
 	}
 	return hits, nil
+}
+
+// HasInactiveMatch reports whether the same above-policy vector query matches
+// only evidence that is not the document's currently active version. It returns
+// a boolean only: inactive snippets and source locations never cross the adapter
+// boundary.
+func (s *Store) HasInactiveMatch(
+	ctx context.Context,
+	profile knowledge.Profile,
+	query []float32,
+) (bool, error) {
+	if len(query) != knowledge.VectorDimension || strings.TrimSpace(profile.Fingerprint) == "" {
+		return false, knowledge.ErrInvalidArgument
+	}
+	var matched bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM syncbase.search_chunk c
+			JOIN syncbase.document_version v
+			  ON v.id=c.version_id AND v.profile_fingerprint=c.profile_fingerprint
+			JOIN syncbase.document d ON d.id=v.document_id
+			WHERE c.profile_fingerprint=$2
+			  AND (v.status <> 'ACTIVE' OR d.active_version_id IS DISTINCT FROM v.id)
+			  AND (1.0 - ((c.embedding <=> $1) / 2.0)) >= $3
+			LIMIT 1
+		)`, pgvector.NewVector(query), profile.Fingerprint, profile.MinimumScore).Scan(&matched)
+	if err != nil {
+		return false, databaseError("search inactive chunks", err)
+	}
+	return matched, nil
 }
 
 func verifyWritableClaim(ctx context.Context, tx pgx.Tx, claimed knowledge.ClaimedRun) error {
