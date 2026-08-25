@@ -2,3 +2,6 @@
 /output/
 *.test
 *.out
+
+# Custom
+PRODUCT.md
