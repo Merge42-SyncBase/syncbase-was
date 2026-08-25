@@ -131,6 +131,24 @@ func (r *Runtime) Documents(ctx context.Context, query string, limit int) ([]Hit
 	if err != nil {
 		return nil, err
 	}
+	return publicHits(hits), nil
+}
+
+// GroundedDocuments adds the deterministic grounding decision used by MCP and
+// browser clients without changing the legacy Documents method.
+func (r *Runtime) GroundedDocuments(
+	ctx context.Context,
+	query string,
+	limit int,
+) ([]Hit, string, string, error) {
+	result, err := r.search.GroundedDocuments(ctx, query, limit)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return publicHits(result.Hits), string(result.Status), string(result.Reason), nil
+}
+
+func publicHits(hits []knowledge.SearchHit) []Hit {
 	result := make([]Hit, len(hits))
 	for index, hit := range hits {
 		result[index] = Hit{
@@ -145,7 +163,7 @@ func (r *Runtime) Documents(ctx context.Context, query string, limit int) ([]Hit
 			SourceURL:       hit.SourceURL,
 		}
 	}
-	return result, nil
+	return result
 }
 
 // Ready verifies the database profile and local query embedder without mutation.

@@ -93,6 +93,22 @@ func newTestHandler(t *testing.T, documentStore documentService) http.Handler {
 	return newTestHandlerWithSessionStore(t, documentStore, newMemorySessionStore())
 }
 
+func newTestHandlerWithMCP(t *testing.T, documentStore documentService, endpoint, token string) http.Handler {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte("correct horse battery staple"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("GenerateFromPassword: %v", err)
+	}
+	handler, err := New(Config{
+		AdminUsername: "admin", AdminPasswordBcrypt: string(hash), Sessions: newMemorySessionStore(),
+		MCPURL: endpoint, MCPToken: token,
+	}, documentStore)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return handler
+}
+
 func newTestHandlerWithSessionStore(t *testing.T, documentStore documentService, store sessions.Store) http.Handler {
 	t.Helper()
 	hash, err := bcrypt.GenerateFromPassword([]byte("correct horse battery staple"), bcrypt.MinCost)

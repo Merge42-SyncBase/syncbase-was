@@ -3,6 +3,7 @@ package search
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -20,9 +21,17 @@ type repository interface {
 	Search(context.Context, knowledge.Profile, []float32, int, string) ([]knowledge.SearchHit, error)
 }
 
+type inactiveMatchRepository interface {
+	HasInactiveMatch(context.Context, knowledge.Profile, []float32) (bool, error)
+}
+
 type embedder interface {
 	EmbedQuery(context.Context, string, knowledge.Profile) ([]float32, error)
 	Ready(context.Context) error
+}
+
+type sourceVerifier interface {
+	Verify(context.Context, string, string) error
 }
 
 // Service validates, embeds, and executes grounded document searches.
@@ -32,6 +41,33 @@ type Service struct {
 	profile       knowledge.Profile
 	publicBaseURL string
 	exactMatch    bool
+	sources       sourceVerifier
+}
+
+// GroundingStatus is the deterministic retrieval-safety decision returned to clients.
+type GroundingStatus string
+
+const (
+	// GroundingSupported means at least one active, above-policy evidence hit is available.
+	GroundingSupported GroundingStatus = "SUPPORTED"
+	// GroundingInsufficientEvidence means callers must not treat the empty result as grounded evidence.
+	GroundingInsufficientEvidence GroundingStatus = "INSUFFICIENT_EVIDENCE"
+)
+
+// GroundingReason identifies why the retrieval substrate returned no evidence.
+type GroundingReason string
+
+const (
+	GroundingNoHitsAbovePolicy          GroundingReason = "NO_HITS_ABOVE_POLICY"
+	GroundingOnlyInactiveVersionMatched GroundingReason = "ONLY_INACTIVE_VERSION_MATCHED"
+	GroundingSourceUnavailable          GroundingReason = "SOURCE_UNAVAILABLE"
+)
+
+// GroundedResult keeps the legacy hits intact while adding an explicit safety decision.
+type GroundedResult struct {
+	Status GroundingStatus
+	Reason GroundingReason
+	Hits   []knowledge.SearchHit
 }
 
 // New returns a search service backed by the provided repository and embedder.
@@ -44,13 +80,19 @@ func New(
 	profile knowledge.Profile,
 	publicBaseURL string,
 	exactMatch bool,
+	sourceVerifiers ...sourceVerifier,
 ) (*Service, error) {
 	parsedBaseURL, err := url.Parse(strings.TrimSpace(publicBaseURL))
 	if repository == nil || embedder == nil || err != nil || parsedBaseURL.Host == "" ||
 		(parsedBaseURL.Scheme != "http" && parsedBaseURL.Scheme != "https") || parsedBaseURL.User != nil ||
 		parsedBaseURL.RawQuery != "" || parsedBaseURL.Fragment != "" ||
-		profile.VectorDimension != knowledge.VectorDimension {
+		profile.VectorDimension != knowledge.VectorDimension || len(sourceVerifiers) > 1 ||
+		(len(sourceVerifiers) == 1 && sourceVerifiers[0] == nil) {
 		return nil, fmt.Errorf("configure search: %w", knowledge.ErrInvalidArgument)
+	}
+	var sources sourceVerifier
+	if len(sourceVerifiers) == 1 {
+		sources = sourceVerifiers[0]
 	}
 	return &Service{
 		repository:    repository,
@@ -58,6 +100,7 @@ func New(
 		profile:       profile,
 		publicBaseURL: strings.TrimRight(parsedBaseURL.String(), "/"),
 		exactMatch:    exactMatch,
+		sources:       sources,
 	}, nil
 }
 
@@ -76,31 +119,90 @@ func (s *Service) Documents(
 	query string,
 	limit int,
 ) ([]knowledge.SearchHit, error) {
+	hits, _, err := s.searchActive(ctx, query, limit)
+	return hits, err
+}
+
+// GroundedDocuments returns only active, above-policy evidence and classifies every
+// safe empty result. Retryable dependency failures become SOURCE_UNAVAILABLE with
+// an explicit empty slice; invalid input and non-retryable configuration failures
+// remain errors.
+func (s *Service) GroundedDocuments(
+	ctx context.Context,
+	query string,
+	limit int,
+) (GroundedResult, error) {
+	hits, vector, err := s.searchActive(ctx, query, limit)
+	if err != nil {
+		if errors.Is(err, knowledge.ErrTemporarilyUnavailable) || errors.Is(err, context.DeadlineExceeded) {
+			return insufficient(GroundingSourceUnavailable), nil
+		}
+		return GroundedResult{}, err
+	}
+	if len(hits) > 0 {
+		if s.sources == nil {
+			return insufficient(GroundingSourceUnavailable), nil
+		}
+		for _, hit := range hits {
+			if err := s.sources.Verify(ctx, hit.StorageKey, hit.ContentSHA256); err != nil {
+				return insufficient(GroundingSourceUnavailable), nil
+			}
+		}
+		return GroundedResult{Status: GroundingSupported, Hits: hits}, nil
+	}
+	if detector, ok := s.repository.(inactiveMatchRepository); ok {
+		matched, probeErr := detector.HasInactiveMatch(ctx, s.profile, vector)
+		if probeErr != nil {
+			if errors.Is(probeErr, knowledge.ErrTemporarilyUnavailable) || errors.Is(probeErr, context.DeadlineExceeded) {
+				return insufficient(GroundingSourceUnavailable), nil
+			}
+			return GroundedResult{}, fmt.Errorf("check inactive search evidence: %w", probeErr)
+		}
+		if matched {
+			return insufficient(GroundingOnlyInactiveVersionMatched), nil
+		}
+	}
+	return insufficient(GroundingNoHitsAbovePolicy), nil
+}
+
+func insufficient(reason GroundingReason) GroundedResult {
+	return GroundedResult{
+		Status: GroundingInsufficientEvidence,
+		Reason: reason,
+		Hits:   make([]knowledge.SearchHit, 0),
+	}
+}
+
+func (s *Service) searchActive(
+	ctx context.Context,
+	query string,
+	limit int,
+) ([]knowledge.SearchHit, []float32, error) {
 	query = strings.TrimSpace(query)
 	if query == "" || len([]rune(query)) > maxQueryRune {
-		return nil, knowledge.ErrInvalidArgument
+		return nil, nil, knowledge.ErrInvalidArgument
 	}
 	if limit == 0 {
 		limit = defaultLimit
 	}
 	if limit < 1 || limit > maxLimit {
-		return nil, knowledge.ErrInvalidArgument
+		return nil, nil, knowledge.ErrInvalidArgument
 	}
 	vector, err := s.embedder.EmbedQuery(ctx, query, s.profile)
 	if err != nil {
-		return nil, fmt.Errorf("embed search query: %w", err)
+		return nil, nil, fmt.Errorf("embed search query: %w", err)
 	}
 	if len(vector) != knowledge.VectorDimension {
-		return nil, knowledge.ErrProfileMismatch
+		return nil, nil, knowledge.ErrProfileMismatch
 	}
 	hits, err := s.repository.Search(ctx, s.profile, vector, limit, s.publicBaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("search active documents: %w", err)
+		return nil, vector, fmt.Errorf("search active documents: %w", err)
 	}
-	if !s.exactMatch {
-		return hits, nil
+	if s.exactMatch {
+		hits = refineHits(hits, query)
 	}
-	return refineHits(hits, query), nil
+	return hits, vector, nil
 }
 
 // refineHits promotes the top semantic candidates that actually contain the

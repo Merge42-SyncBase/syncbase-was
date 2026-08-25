@@ -1054,6 +1054,37 @@ func (s *Store) Search(
 	return hits, nil
 }
 
+// HasInactiveMatch reports whether the same above-policy vector query matches
+// only evidence that is not the document's currently active version. It returns
+// a boolean only: inactive snippets and source locations never cross the adapter
+// boundary.
+func (s *Store) HasInactiveMatch(
+	ctx context.Context,
+	profile knowledge.Profile,
+	query []float32,
+) (bool, error) {
+	if len(query) != knowledge.VectorDimension || strings.TrimSpace(profile.Fingerprint) == "" {
+		return false, knowledge.ErrInvalidArgument
+	}
+	var matched bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM syncbase.search_chunk c
+			JOIN syncbase.document_version v
+			  ON v.id=c.version_id AND v.profile_fingerprint=c.profile_fingerprint
+			JOIN syncbase.document d ON d.id=v.document_id
+			WHERE c.profile_fingerprint=$2
+			  AND (v.status <> 'ACTIVE' OR d.active_version_id IS DISTINCT FROM v.id)
+			  AND (1.0 - ((c.embedding <=> $1) / 2.0)) >= $3
+			LIMIT 1
+		)`, pgvector.NewVector(query), profile.Fingerprint, profile.MinimumScore).Scan(&matched)
+	if err != nil {
+		return false, databaseError("search inactive chunks", err)
+	}
+	return matched, nil
+}
+
 func verifyWritableClaim(ctx context.Context, tx pgx.Tx, claimed knowledge.ClaimedRun) error {
 	var runID uuid.UUID
 	err := tx.QueryRow(ctx, `
