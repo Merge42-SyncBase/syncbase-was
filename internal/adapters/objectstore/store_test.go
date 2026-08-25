@@ -70,3 +70,31 @@ func TestReadyVerifiesRootAccess(t *testing.T) {
 		t.Fatal("Ready with missing root = nil, want error")
 	}
 }
+
+func TestReadableAcceptsReadOnlyRootWithoutMutation(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store, err := objectstore.New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := os.WriteFile(root+"/existing-original", []byte("source"), 0o440); err != nil {
+		t.Fatalf("seed source root: %v", err)
+	}
+	if err := os.Chmod(root, 0o550); err != nil {
+		t.Fatalf("make source root read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o750) })
+
+	if err := store.Readable(context.Background()); err != nil {
+		t.Fatalf("Readable with read-only root: %v", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("ReadDir after Readable: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "existing-original" {
+		t.Fatalf("source-root entries after Readable = %v, want only existing-original", entries)
+	}
+}

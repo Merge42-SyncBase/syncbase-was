@@ -20,7 +20,7 @@ func TestMCPClientCallsRealSearchDocumentsTool(t *testing.T) {
 			return
 		}
 		response.Header().Set("Content-Type", "application/json")
-		_, _ = response.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"results":[{` +
+		_, _ = response.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"grounding_status":"SUPPORTED","grounding_reason":null,"results":[{` +
 			`"rank":1,"score":0.91,"document_id":"` + documentID.String() + `",` +
 			`"document_name":"보안 정책","version_id":"` + versionID.String() + `","document_version":2,"page_number":3,` +
 			`"snippet":"비밀번호는 90일마다 변경합니다.",` +
@@ -38,6 +38,33 @@ func TestMCPClientCallsRealSearchDocumentsTool(t *testing.T) {
 	if len(hits) != 1 || hits[0].DocumentID != documentID || hits[0].VersionID != versionID || hits[0].DocumentVersion != 2 ||
 		hits[0].PageNumber != 3 || hits[0].Rank != 1 {
 		t.Fatalf("hits = %+v", hits)
+	}
+}
+
+func TestMCPClientFailsClosedWhenLegacyResponseOmitsGroundingMetadata(t *testing.T) {
+	documentID := uuid.New()
+	versionID := uuid.New()
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"results":[{` +
+			`"rank":1,"score":0.91,"document_id":"` + documentID.String() + `",` +
+			`"document_name":"보안 정책","version_id":"` + versionID.String() + `","document_version":2,"page_number":3,` +
+			`"snippet":"비밀번호는 90일마다 변경합니다.",` +
+			`"source_url":"http://web/sources/` + documentID.String() + `/versions/2?page=3"}]}}}`))
+	}))
+	t.Cleanup(server.Close)
+	client, err := newMCPClient(server.URL+"/mcp", "sb_mcp_v1_test", server.Client())
+	if err != nil {
+		t.Fatalf("newMCPClient: %v", err)
+	}
+
+	got, err := client.SearchGroundedDocuments(context.Background(), "비밀번호 정책", 5)
+	if err != nil {
+		t.Fatalf("SearchGroundedDocuments: %v", err)
+	}
+	if got.Status != groundingInsufficientEvidence || got.Reason == nil ||
+		*got.Reason != groundingSourceUnavailable || got.Hits == nil || len(got.Hits) != 0 {
+		t.Fatalf("grounding result = %+v, want empty SOURCE_UNAVAILABLE evidence", got)
 	}
 }
 

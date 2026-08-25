@@ -61,6 +61,72 @@ func TestDocumentsRejectsInvalidInputBeforeEmbedding(t *testing.T) {
 	}
 }
 
+func TestReadyFailsWhenConfiguredOriginalSourceStoreIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	sourceErr := errors.New("original source store unavailable")
+	verifier := &readinessSourceVerifier{readyErr: sourceErr}
+	service, err := search.New(
+		&recordingRepository{}, &recordingEmbedder{},
+		knowledge.Profile{VectorDimension: knowledge.VectorDimension},
+		"https://docs.example.test", false, verifier,
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = service.Ready(context.Background())
+	if !errors.Is(err, sourceErr) {
+		t.Fatalf("Ready error = %v, want original source readiness error", err)
+	}
+	if verifier.readyCalls != 1 {
+		t.Fatalf("source readiness calls = %d, want 1", verifier.readyCalls)
+	}
+}
+
+func TestReadyFailsClosedWhenSourceVerifierCannotReportReadiness(t *testing.T) {
+	t.Parallel()
+
+	service, err := search.New(
+		&recordingRepository{}, &recordingEmbedder{},
+		knowledge.Profile{VectorDimension: knowledge.VectorDimension},
+		"https://docs.example.test", false, verifyOnlySourceVerifier{},
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := service.Ready(context.Background()); !errors.Is(err, knowledge.ErrTemporarilyUnavailable) {
+		t.Fatalf("Ready error = %v, want ErrTemporarilyUnavailable", err)
+	}
+}
+
+func TestReadyAcceptsConfiguredReadOnlyOriginalSourceStore(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	originals, err := objectstore.New(root)
+	if err != nil {
+		t.Fatalf("objectstore.New: %v", err)
+	}
+	if err := os.Chmod(root, 0o550); err != nil {
+		t.Fatalf("make source root read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o750) })
+	service, err := search.New(
+		&recordingRepository{}, &recordingEmbedder{},
+		knowledge.Profile{VectorDimension: knowledge.VectorDimension},
+		"https://docs.example.test", false, originals,
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := service.Ready(context.Background()); err != nil {
+		t.Fatalf("Ready with read-only original source root: %v", err)
+	}
+}
+
 func TestGroundedDocumentsClassifiesEverySafetyStateWithoutLeakingEvidence(t *testing.T) {
 	profile := knowledge.Profile{VectorDimension: knowledge.VectorDimension}
 	hit := knowledge.SearchHit{Rank: 1, Snippet: "검증 가능한 활성 근거"}
@@ -437,6 +503,24 @@ type acceptingSourceVerifier struct{}
 
 func (acceptingSourceVerifier) Verify(context.Context, string, string) error { return nil }
 
+func (acceptingSourceVerifier) Readable(context.Context) error { return nil }
+
+type verifyOnlySourceVerifier struct{}
+
+func (verifyOnlySourceVerifier) Verify(context.Context, string, string) error { return nil }
+
+type readinessSourceVerifier struct {
+	readyCalls int
+	readyErr   error
+}
+
+func (v *readinessSourceVerifier) Verify(context.Context, string, string) error { return nil }
+
+func (v *readinessSourceVerifier) Readable(context.Context) error {
+	v.readyCalls++
+	return v.readyErr
+}
+
 type countingSourceVerifier struct {
 	calls int
 }
@@ -445,6 +529,8 @@ func (v *countingSourceVerifier) Verify(context.Context, string, string) error {
 	v.calls++
 	return nil
 }
+
+func (*countingSourceVerifier) Readable(context.Context) error { return nil }
 
 func (e *recordingEmbedder) EmbedQuery(_ context.Context, query string, _ knowledge.Profile) ([]float32, error) {
 	e.calls++

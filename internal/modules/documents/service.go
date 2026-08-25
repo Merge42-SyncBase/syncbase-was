@@ -7,9 +7,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -28,6 +28,8 @@ type repository interface {
 	GetDocument(context.Context, uuid.UUID) (knowledge.DocumentDetails, error)
 	GetSource(context.Context, uuid.UUID, int) (knowledge.SourceDocument, error)
 	RecoverRegistration(context.Context, string) (knowledge.UploadRecovery, error)
+	ReserveRegistration(context.Context, knowledge.ReserveUploadCommand) (knowledge.UploadRecovery, error)
+	ExpireRegistration(context.Context, knowledge.ReserveUploadCommand) error
 	StorageKeyReferenced(context.Context, string) (bool, error)
 	Register(context.Context, knowledge.RegisterCommand) (knowledge.Registration, error)
 	Retry(context.Context, uuid.UUID, string) (uuid.UUID, error)
@@ -82,10 +84,10 @@ type Source struct {
 
 // Service owns document registration and access policy across persistence adapters.
 type Service struct {
-	repository repository
-	originals  originalStore
-	parser     parser
-	registerMu sync.Mutex
+	repository   repository
+	originals    originalStore
+	parser       parser
+	registerGate chan struct{}
 }
 
 // New returns a document module backed by the provided persistence adapters.
@@ -93,7 +95,12 @@ func New(repository repository, originals originalStore, parser parser) (*Servic
 	if repository == nil || originals == nil || parser == nil {
 		return nil, fmt.Errorf("configure documents: %w", knowledge.ErrInvalidArgument)
 	}
-	return &Service{repository: repository, originals: originals, parser: parser}, nil
+	return &Service{
+		repository:   repository,
+		originals:    originals,
+		parser:       parser,
+		registerGate: make(chan struct{}, 1),
+	}, nil
 }
 
 // Preflight validates a PDF and returns stable metadata without storing it.
@@ -116,7 +123,7 @@ func (s *Service) Preflight(ctx context.Context, fileName string, content []byte
 // If the database write fails, it removes the object only after proving that no
 // committed version references the content-addressed key.
 func (s *Service) Register(ctx context.Context, command RegisterCommand) (knowledge.Registration, error) {
-	fileName, _, err := s.inspectPDF(ctx, command.OriginalFileName, command.Content)
+	fileName, err := validatePDFEnvelope(command.OriginalFileName, command.Content)
 	if err != nil {
 		return knowledge.Registration{}, err
 	}
@@ -134,24 +141,72 @@ func (s *Service) Register(ctx context.Context, command RegisterCommand) (knowle
 	if err != nil {
 		return knowledge.Registration{}, err
 	}
+	digest := sha256.Sum256(command.Content)
+	contentSHA256 := hex.EncodeToString(digest[:])
+	started := time.Now()
+	recovery, err := s.repository.ReserveRegistration(ctx, knowledge.ReserveUploadCommand{
+		RequestKey: command.RequestKey, Operation: command.Operation,
+		TargetDocumentID: command.TargetDocumentID, ContentSHA256: contentSHA256,
+		ByteSize: int64(len(command.Content)),
+	})
+	logRegistrationStage(ctx, "pending_reservation", started, err)
+	if err != nil {
+		return knowledge.Registration{}, err
+	}
+	if recovery.State == knowledge.UploadAccepted {
+		recovery.Registration.Recovered = true
+		return recovery.Registration, nil
+	}
+	if recovery.State != knowledge.UploadPending {
+		return knowledge.Registration{}, knowledge.ErrIdempotencyConflict
+	}
 
-	s.registerMu.Lock()
-	defer s.registerMu.Unlock()
+	started = time.Now()
+	_, _, err = s.inspectPDF(ctx, fileName, command.Content)
+	logRegistrationStage(ctx, "parse", started, err)
+	if err != nil {
+		if errors.Is(err, knowledge.ErrInvalidPDF) || errors.Is(err, knowledge.ErrInvalidArgument) {
+			cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+			expireErr := s.repository.ExpireRegistration(cleanupContext, knowledge.ReserveUploadCommand{
+				RequestKey: command.RequestKey, Operation: command.Operation,
+				TargetDocumentID: command.TargetDocumentID, ContentSHA256: contentSHA256,
+				ByteSize: int64(len(command.Content)),
+			})
+			cancel()
+			if expireErr != nil {
+				return knowledge.Registration{}, errors.Join(err, fmt.Errorf("expire rejected upload reservation: %w", expireErr))
+			}
+		}
+		return knowledge.Registration{}, err
+	}
+
+	started = time.Now()
+	select {
+	case s.registerGate <- struct{}{}:
+		logRegistrationStage(ctx, "registration_gate_wait", started, nil)
+	case <-ctx.Done():
+		logRegistrationStage(ctx, "registration_gate_wait", started, ctx.Err())
+		return knowledge.Registration{}, fmt.Errorf("wait for document registration gate: %w", ctx.Err())
+	}
+	defer func() { <-s.registerGate }()
+	started = time.Now()
 	storageKey, err := s.originals.Put(ctx, command.Content)
+	logRegistrationStage(ctx, "original_sync", started, err)
 	if err != nil {
 		return knowledge.Registration{}, fmt.Errorf("store original PDF: %w", err)
 	}
-	digest := sha256.Sum256(command.Content)
+	started = time.Now()
 	registration, err := s.repository.Register(ctx, knowledge.RegisterCommand{
 		RequestKey:       command.RequestKey,
 		Operation:        command.Operation,
 		TargetDocumentID: command.TargetDocumentID,
 		DocumentName:     name,
-		ContentSHA256:    hex.EncodeToString(digest[:]),
+		ContentSHA256:    contentSHA256,
 		ByteSize:         int64(len(command.Content)),
 		OriginalFileName: fileName,
 		StorageKey:       storageKey,
 	})
+	logRegistrationStage(ctx, "transaction", started, err)
 	if err == nil {
 		return registration, nil
 	}
@@ -230,12 +285,9 @@ func (s *Service) inspectPDF(
 	fileName string,
 	content []byte,
 ) (string, []knowledge.PageText, error) {
-	fileName = filepath.Base(fileName)
-	if fileName == "." || fileName == "" || utf8.RuneCountInString(fileName) > 255 {
-		return "", nil, fmt.Errorf("invalid PDF filename: %w", knowledge.ErrInvalidArgument)
-	}
-	if len(content) < 5 || len(content) > knowledge.MaxUploadBytes || string(content[:5]) != "%PDF-" {
-		return "", nil, fmt.Errorf("invalid PDF upload: %w", knowledge.ErrInvalidPDF)
+	fileName, err := validatePDFEnvelope(fileName, content)
+	if err != nil {
+		return "", nil, err
 	}
 	pages, err := s.parser.Parse(ctx, content)
 	if err != nil {
@@ -245,6 +297,29 @@ func (s *Service) inspectPDF(
 		return "", nil, knowledge.ErrInvalidPDF
 	}
 	return fileName, pages, nil
+}
+
+func validatePDFEnvelope(fileName string, content []byte) (string, error) {
+	fileName = filepath.Base(fileName)
+	if fileName == "." || fileName == "" || utf8.RuneCountInString(fileName) > 255 {
+		return "", fmt.Errorf("invalid PDF filename: %w", knowledge.ErrInvalidArgument)
+	}
+	if len(content) < 5 || len(content) > knowledge.MaxUploadBytes || string(content[:5]) != "%PDF-" {
+		return "", fmt.Errorf("invalid PDF upload: %w", knowledge.ErrInvalidPDF)
+	}
+	return fileName, nil
+}
+
+func logRegistrationStage(ctx context.Context, stage string, started time.Time, err error) {
+	outcome := "ok"
+	if err != nil {
+		outcome = "error"
+	}
+	slog.InfoContext(ctx, "document registration stage",
+		"stage", stage,
+		"duration_ms", time.Since(started).Milliseconds(),
+		"outcome", outcome,
+	)
 }
 
 func (s *Service) removeUncommittedOriginal(ctx context.Context, storageKey string) error {

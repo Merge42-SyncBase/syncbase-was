@@ -20,6 +20,14 @@ import (
 	"github.com/google/uuid"
 )
 
+func TestRegistrationTimeoutIsAStructuredRetryableServiceUnavailableError(t *testing.T) {
+	status, code, message, retryable := apiErrorFor(context.DeadlineExceeded)
+	if status != http.StatusServiceUnavailable || code != "TEMPORARILY_UNAVAILABLE" ||
+		message == "" || !retryable {
+		t.Fatalf("apiErrorFor(deadline) = status %d code %q message %q retryable %t", status, code, message, retryable)
+	}
+}
+
 func TestAPIAdminSessionAndDocumentProjection(t *testing.T) {
 	documentID := uuid.New()
 	versionID := uuid.New()

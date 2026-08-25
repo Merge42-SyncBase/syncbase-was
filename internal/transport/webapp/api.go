@@ -23,6 +23,7 @@ const (
 	maxDocumentLimit      = 100
 	defaultNameMatchLimit = 3
 	defaultSearchLimit    = 10
+	registrationTimeout   = 30 * time.Second
 )
 
 type apiError struct {
@@ -313,7 +314,9 @@ func (s *Server) apiRegister(
 	if operation == knowledge.RegisterNewDocument {
 		documentName = request.FormValue("documentName")
 	}
-	registration, err := s.documents.Register(request.Context(), documents.RegisterCommand{
+	registrationContext, cancel := context.WithTimeout(request.Context(), registrationTimeout)
+	defer cancel()
+	registration, err := s.documents.Register(registrationContext, documents.RegisterCommand{
 		RequestKey: request.FormValue("requestKey"), Operation: operation,
 		TargetDocumentID: target, DocumentName: documentName,
 		OriginalFileName: originalName, Content: content,

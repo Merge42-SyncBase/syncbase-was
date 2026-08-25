@@ -33,6 +33,25 @@ func New(root string) (*Store, error) {
 	return &Store{root: absolute}, nil
 }
 
+// Readable verifies that the root directory can be inspected without mutating it.
+func (s *Store) Readable(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	directory, err := os.Open(s.root)
+	if err != nil {
+		return fmt.Errorf("open object root: %w", err)
+	}
+	if _, err := directory.Readdirnames(1); err != nil && !errors.Is(err, io.EOF) {
+		_ = directory.Close()
+		return fmt.Errorf("read object root: %w", err)
+	}
+	if err := directory.Close(); err != nil {
+		return fmt.Errorf("close object root: %w", err)
+	}
+	return ctx.Err()
+}
+
 // Ready verifies that the root directory is readable and writable now.
 func (s *Store) Ready(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {

@@ -40,7 +40,7 @@ func isTemporaryDatabaseError(err error) bool {
 		return true
 	}
 	switch postgresError.Code {
-	case "40001", "40P01", "57P01", "57P02", "57P03":
+	case "40001", "40P01", "55P03", "57014", "57P01", "57P02", "57P03":
 		return true
 	default:
 		return false

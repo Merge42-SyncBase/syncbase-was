@@ -183,11 +183,11 @@ func validateMCPGrounding(
 	reason *groundingReason,
 	hits []knowledge.SearchHit,
 ) (mcpGroundedResult, error) {
-	// Rolling-upgrade compatibility: infer the additive fields from an older MCP
-	// response while preserving all existing hit fields.
+	// Rolling-upgrade compatibility remains fail-closed: legacy hits without an
+	// explicit grounding decision cannot be exposed as supported evidence.
 	if status == "" {
 		if len(hits) > 0 {
-			status = groundingSupported
+			return insufficientMCPResult(groundingSourceUnavailable), nil
 		} else {
 			return insufficientMCPResult(groundingNoHitsAbovePolicy), nil
 		}
