@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -85,10 +84,10 @@ type Source struct {
 
 // Service owns document registration and access policy across persistence adapters.
 type Service struct {
-	repository repository
-	originals  originalStore
-	parser     parser
-	registerMu sync.Mutex
+	repository   repository
+	originals    originalStore
+	parser       parser
+	registerGate chan struct{}
 }
 
 // New returns a document module backed by the provided persistence adapters.
@@ -96,7 +95,12 @@ func New(repository repository, originals originalStore, parser parser) (*Servic
 	if repository == nil || originals == nil || parser == nil {
 		return nil, fmt.Errorf("configure documents: %w", knowledge.ErrInvalidArgument)
 	}
-	return &Service{repository: repository, originals: originals, parser: parser}, nil
+	return &Service{
+		repository:   repository,
+		originals:    originals,
+		parser:       parser,
+		registerGate: make(chan struct{}, 1),
+	}, nil
 }
 
 // Preflight validates a PDF and returns stable metadata without storing it.
@@ -176,8 +180,15 @@ func (s *Service) Register(ctx context.Context, command RegisterCommand) (knowle
 		return knowledge.Registration{}, err
 	}
 
-	s.registerMu.Lock()
-	defer s.registerMu.Unlock()
+	started = time.Now()
+	select {
+	case s.registerGate <- struct{}{}:
+		logRegistrationStage(ctx, "registration_gate_wait", started, nil)
+	case <-ctx.Done():
+		logRegistrationStage(ctx, "registration_gate_wait", started, ctx.Err())
+		return knowledge.Registration{}, fmt.Errorf("wait for document registration gate: %w", ctx.Err())
+	}
+	defer func() { <-s.registerGate }()
 	started = time.Now()
 	storageKey, err := s.originals.Put(ctx, command.Content)
 	logRegistrationStage(ctx, "original_sync", started, err)

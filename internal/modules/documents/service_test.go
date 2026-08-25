@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/Merge42-SyncBase/syncbase-was/internal/adapters/objectstore"
 	"github.com/Merge42-SyncBase/syncbase-was/internal/modules/knowledge"
@@ -43,6 +44,36 @@ func TestRegisterPersistsValidatedOriginal(t *testing.T) {
 		repository.command.StorageKey != originals.key ||
 		repository.command.OriginalFileName != "policy.pdf" {
 		t.Fatalf("repository command=%+v", repository.command)
+	}
+}
+
+func TestRegisterGateHonorsTheRequestDeadline(t *testing.T) {
+	repository := &fixtureRepository{}
+	service := newFixtureService(t, repository, &fixtureOriginalStore{}, &fixtureParser{
+		pages: []knowledge.PageText{{PageNumber: 1, Text: "정책 본문"}},
+	})
+	service.registerGate <- struct{}{}
+	defer func() { <-service.registerGate }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := service.Register(ctx, RegisterCommand{
+		RequestKey:       "registration-gate-timeout",
+		Operation:        knowledge.RegisterNewDocument,
+		DocumentName:     "정책",
+		OriginalFileName: "policy.pdf",
+		Content:          []byte("%PDF-registration-gate-timeout"),
+	})
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Register error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("Register waited %s for the gate, want a bounded deadline", elapsed)
+	}
+	if repository.command.RequestKey != "" {
+		t.Fatalf("repository Register called after gate timeout: %+v", repository.command)
 	}
 }
 
