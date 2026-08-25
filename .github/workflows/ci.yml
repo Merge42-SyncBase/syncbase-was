@@ -6,23 +6,15 @@ on:
   push:
     branches: [main]
 
-env:
-  GOPRIVATE: github.com/Merge42-SyncBase/*
-
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26.6"
-
-      # syncbase-embedding is a private module; GH_MODULES_TOKEN is a
-      # fine-grained PAT (Contents: read) with access to it.
-      - name: Configure private module access
-        run: git config --global url."https://x-access-token:${{ secrets.GH_MODULES_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
       - run: go build ./cmd/...
       - run: go vet ./...
@@ -45,75 +37,30 @@ jobs:
           - target_package: ./cmd/migrate
             image: syncbase-migrate
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - id: vars
         run: echo "sha_short=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           build-args: |
             TARGET_PACKAGE=${{ matrix.target_package }}
-          secrets: |
-            github_token=${{ secrets.GH_MODULES_TOKEN }}
           push: true
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
           tags: |
             ghcr.io/merge42-syncbase/${{ matrix.image }}:latest
             ghcr.io/merge42-syncbase/${{ matrix.image }}:sha-${{ steps.vars.outputs.sha_short }}
-
-  # Keeps syncbase-mcp's pinned version of this module current without a
-  # human manually computing a pseudo-version after every merge.
-  bump-mcp:
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: Merge42-SyncBase/syncbase-mcp
-          token: ${{ secrets.GH_MODULES_TOKEN }}
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.6"
-
-      - name: Configure private module access
-        run: git config --global url."https://x-access-token:${{ secrets.GH_MODULES_TOKEN }}@github.com/".insteadOf "https://github.com/"
-
-      - run: |
-          go env -w GOPRIVATE=github.com/Merge42-SyncBase/*
-          go get github.com/Merge42-SyncBase/syncbase-was@${{ github.sha }}
-          go mod tidy
-          # -o /dev/null: ./cmd/... resolves to a single package (cmd/mcp) in
-          # this repo, so a bare `go build ./cmd/...` writes a binary to the
-          # working directory instead of discarding it, which
-          # create-pull-request below would then stage.
-          go build -o /dev/null ./cmd/...
-
-      - uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.GH_MODULES_TOKEN }}
-          commit-message: "chore: bump syncbase-was to ${{ github.sha }}"
-          branch: chore/bump-syncbase-was
-          delete-branch: true
-          add-paths: |
-            go.mod
-            go.sum
-          title: "chore: bump syncbase-was"
-          body: |
-            Auto-generated after a merge to `syncbase-was@main`
-            (${{ github.sha }}). Review the diff, confirm CI passes, then merge.
