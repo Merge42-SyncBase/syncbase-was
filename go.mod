@@ -6,7 +6,7 @@ require (
 	github.com/Merge42-SyncBase/syncbase-embedding v0.0.0-20260816133742-bf91ee529a7b
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/klippa-app/go-pdfium v1.19.6
+	github.com/klippa-app/go-pdfium v1.19.8
 	github.com/pgvector/pgvector-go v0.4.1
 	golang.org/x/crypto v0.54.0
 	golang.org/x/text v0.40.0
