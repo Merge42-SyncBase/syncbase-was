@@ -9,7 +9,7 @@ require (
 	github.com/klippa-app/go-pdfium v1.19.6
 	github.com/pgvector/pgvector-go v0.4.1
 	golang.org/x/crypto v0.54.0
-	golang.org/x/text v0.40.0
+	golang.org/x/text v0.42.0
 )
 
 require (
@@ -27,6 +27,6 @@ require (
 	github.com/tetratelabs/wazero v1.12.0 // indirect
 	github.com/yalue/onnxruntime_go v1.31.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )
