@@ -6,10 +6,10 @@ require (
 	github.com/Merge42-SyncBase/syncbase-embedding v0.0.0-20260816133742-bf91ee529a7b
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/klippa-app/go-pdfium v1.19.6
+	github.com/klippa-app/go-pdfium v1.21.0
 	github.com/pgvector/pgvector-go v0.4.1
-	golang.org/x/crypto v0.54.0
-	golang.org/x/text v0.40.0
+	golang.org/x/crypto v0.57.0
+	golang.org/x/text v0.42.0
 )
 
 require (
@@ -26,7 +26,6 @@ require (
 	github.com/sugarme/tokenizer v0.3.0 // indirect
 	github.com/tetratelabs/wazero v1.12.0 // indirect
 	github.com/yalue/onnxruntime_go v1.31.0 // indirect
-	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 )
